@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SHOP International Returns — Pricing & Cost Model</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #fff; }
+  @media print {
+    button, input[type=range] { display: none !important; }
+    div[style*="overflow"] { overflow: visible !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+// ─── CONSTANTS ───
+const COUNTRIES = ["UK","DE","FR","NL","BE","CZ","PL","ES","IT","IOSS","CA"];
+const CLABELS = {UK:"UK",DE:"Germany",FR:"France",NL:"Netherlands",BE:"Belgium",CZ:"Czech Rep",PL:"Poland",ES:"Spain",IT:"Italy",IOSS:"IOSS",CA:"Canada"};
+const YEARS = [2026,2027,2028,2029,2030];
+
+const DEFAULT_FILING_FREQ = {UK:4,DE:12,FR:12,NL:4,BE:12,CZ:12,PL:12,ES:4,IT:12,IOSS:12,CA:4};
+const DEFAULT_MIX = {UK:20,DE:15,FR:12,NL:8,BE:8,CZ:5,PL:5,ES:8,IT:8,IOSS:3,CA:8};
+
+// Default FREP classification (editable per country)
+const DEFAULT_FREP_TYPE = {UK:"none",DE:"steuerberater",FR:"internal_frep",NL:"external_frep",BE:"none",CZ:"none",PL:"internal_frep",ES:"internal_frep",IT:"internal_frep",IOSS:"ioss",CA:"none"};
+
+// Default % of merchants in each country who need FREP/vendor services
+const DEFAULT_VENDOR_PCT = {UK:0,DE:0.40,FR:0.25,NL:0.30,BE:0,CZ:0,PL:0.20,ES:0.25,IT:0.25,IOSS:1.00,CA:0};
+
+// Default complex countries for pricing (editable per country)
+const DEFAULT_COMPLEX = {UK:false,DE:true,FR:true,NL:true,BE:false,CZ:false,PL:true,ES:true,IT:true,IOSS:true,CA:false};
+
+const SCENARIOS = {
+  conservative:{label:"Conservative",adoptionByYear:[0.02,0.05,0.07,0.08,0.10],discountPct:0.00},
+  base:{label:"Base Case",adoptionByYear:[0.05,0.10,0.15,0.18,0.20],discountPct:0.10},
+  aggressive:{label:"Aggressive",adoptionByYear:[0.08,0.15,0.22,0.28,0.33],discountPct:0.15},
+  win:{label:"Win the Deal",adoptionByYear:[0.05,0.10,0.15,0.18,0.20],discountPct:0.20},
+};
+
+// ─── FORMATTERS ───
+const fmt = (v,d=0) => {if(v==null||isNaN(v))return "—";const a=Math.abs(v),s=v<0?"-":"";if(a>=1e6)return `${s}$${(a/1e6).toFixed(1)}M`;if(a>=1e3)return `${s}$${(a/1e3).toFixed(d>0?d:0)}K`;return `${s}$${a.toFixed(d||0)}`;};
+const fmtN = v => {if(!v&&v!==0)return "—";if(v>=1e6)return `${(v/1e6).toFixed(2)}M`;if(v>=1e3)return `${(v/1e3).toFixed(1)}K`;return v.toLocaleString();};
+const pct = (v,d=1) => (v==null||isNaN(v))?"—":`${(v*100).toFixed(d)}%`;
+const gmC = gm => gm<0.5?"#b91c1c":gm<0.6?"#b45309":"#15803d";
+const gmBg = gm => gm<0.5?"rgba(185,28,28,.07)":gm<0.6?"rgba(180,83,9,.07)":"rgba(21,128,61,.05)";
+
+// ─── CORE CALC: VOLUME ───
+function calcVolume(p, adoptionRate, yearIdx) {
+  const halfYear = yearIdx===0?0.5:1;
+  const tam = p.totalMerchants * p.pctInternational;
+  const activeMerchants = Math.round(tam * adoptionRate);
+  const countries = {};
+  let totalReturns = 0;
+  COUNTRIES.forEach(c => {
+    const m = Math.round(activeMerchants * (p.mix[c]||0)/100);
+    const r = Math.round(m * (p.filingFreq[c]||4) * halfYear);
+    countries[c] = {merchants:m, returns:r};
+    totalReturns += r;
+  });
+  const prevAdopt = yearIdx===0?0:(p.scenarioAdoption||[])[yearIdx-1]||0;
+  const prevMerch = Math.round(tam * prevAdopt);
+  const newMerchants = Math.max(0, activeMerchants - prevMerch);
+  return {tam, activeMerchants, totalReturns, countries, newMerchants, halfYear};
+}
+
+// ─── CORE CALC: FIXED COSTS ───
+function calcFixedCosts(totalShopReturns, p, yearIdx) {
+  const halfYear = yearIdx===0?0.5:1;
+  const inflMult = Math.pow(1 + p.costInflation, yearIdx);
+  const totalPlatformReturns = p.existingVolume + totalShopReturns;
+  // We have currentFTEs today — never go below that, but hire more if volume demands it
+  const ftesFromVolume = totalPlatformReturns > 0 ? Math.ceil(totalPlatformReturns / p.returnsPerFTE) : 0;
+  const ftesNeeded = Math.max(p.currentFTEs, ftesFromVolume);
+  const additionalFTEs = Math.max(0, ftesNeeded - p.currentFTEs);
+  const complianceCost = ftesNeeded * p.fteCost * inflMult * halfYear;
+  const infraFixed = p.infraFixed * halfYear;
+  const symansis = (p.symansisDE + p.symansisSVR) * p.EURUSD * halfYear;
+  const frepReserve = p.frepReserve * halfYear;
+  const totalFixed = complianceCost + infraFixed + symansis + frepReserve;
+  const shopShare = totalPlatformReturns > 0 ? totalShopReturns / totalPlatformReturns : 0;
+  const shopFixedCost = totalFixed * shopShare;
+  const fixedPerReturn = totalShopReturns > 0 ? shopFixedCost / totalShopReturns : 0;
+  return {
+    ftesNeeded, additionalFTEs, complianceCost, infraFixed, symansis, frepReserve, totalFixed,
+    shopFixedCost, fixedPerReturn, totalPlatformReturns, shopShare,
+    currentCapacity: p.currentFTEs * p.returnsPerFTE,
+    headroom: Math.max(0, p.currentFTEs * p.returnsPerFTE - p.existingVolume)
+  };
+}
+
+// ─── CORE CALC: BASE VARIABLE COST PER RETURN (no FREP premium) ───
+function getBaseVariableCost(p) {
+  return p.platformVar + p.cipVar; // Always $3.10
+}
+
+// ─── CORE CALC: FREP/IOSS PREMIUM PER RETURN (separate from variable) ───
+function getFrepPremium(country, p) {
+  const ft = p.frepType[country];
+  const vPct = p.vendorPct?.[country] || 0;
+  if (ft === "internal_frep") return p.frepPremium * vPct;
+  if (ft === "ioss") return p.iossPremium * vPct;
+  return 0; // steuerberater, external_frep, none: no FREP premium
+}
+
+// ─── CORE CALC: VENDOR COST PER RETURN ───
+function getVendorCost(country, p) {
+  const vPct = p.vendorPct?.[country] || 0;
+  const ft = p.frepType[country];
+  if (ft === "steuerberater") {
+    return p.vendorDE * p.EURUSD * vPct;
+  }
+  if (ft === "external_frep") {
+    const pr = p.vendorNLPerReturn * p.EURUSD * vPct;
+    const ann = (p.vendorNLAnnual * p.EURUSD * vPct) / (p.filingFreq[country] || 4);
+    const reg = (p.vendorNLReg * p.EURUSD * vPct) / ((p.filingFreq[country] || 4) * p.contractTerm);
+    return pr + ann + reg;
+  }
+  if (country === "PL") return p.vendorPL;
+  return 0;
+}
+
+// ─── CORE CALC: TOTAL COST PER RETURN (4 components) ───
+function calcCountryCost(country, totalShopReturns, p, yearIdx) {
+  const fixed = calcFixedCosts(totalShopReturns, p, yearIdx);
+  const variable = getBaseVariableCost(p);
+  const frepPrem = getFrepPremium(country, p);
+  const vendor = getVendorCost(country, p);
+  return {fixed: fixed.fixedPerReturn, variable, frepPrem, vendor, total: fixed.fixedPerReturn + variable + frepPrem + vendor, fixedDetail: fixed};
+}
+
+// ─── CORE CALC: BLENDED COGS ───
+function calcBlendedCOGS(totalShopReturns, countries, p, yearIdx) {
+  let blended = 0, core = 0;
+  const details = {};
+  COUNTRIES.forEach(c => {
+    const cost = calcCountryCost(c, totalShopReturns, p, yearIdx);
+    const w = totalShopReturns > 0 ? (countries[c]?.returns||0) / totalShopReturns : 0;
+    details[c] = {...cost, weight: w, weighted: cost.total * w, weightedCore: (cost.fixed + cost.variable) * w};
+    blended += cost.total * w;
+    core += (cost.fixed + cost.variable) * w;
+  });
+  return {blended, core, details};
+}
+
+// ─── CORE CALC: FULL P&L ───
+function calcFullPnL(p, adoptionRate, yearIdx, discountPct, scenarioAdoption) {
+  const pp = {...p, scenarioAdoption};
+  const vol = calcVolume(pp, adoptionRate, yearIdx);
+  const {totalReturns, activeMerchants, countries, newMerchants, halfYear} = vol;
+  const cogsData = calcBlendedCOGS(totalReturns, countries, pp, yearIdx);
+  const fixedDetail = calcFixedCosts(totalReturns, pp, yearIdx);
+
+  // Filing revenue (two-tier)
+  let filingRevStd = 0, filingRevCpx = 0;
+  COUNTRIES.forEach(c => {
+    const cr = countries[c].returns;
+    const isComplex = pp.complexCountries[c];
+    const list = isComplex ? pp.complexPrice : pp.standardPrice;
+    const price = list * (1 - discountPct);
+    if (isComplex) filingRevCpx += cr * price; else filingRevStd += cr * price;
+    countries[c].price = price;
+  });
+  const filingRev = filingRevStd + filingRevCpx;
+
+  // Ancillary revenue — FREP fees based on vendorPct per country
+  let frepMerchants = 0;
+  COUNTRIES.forEach(c => {
+    const ft = pp.frepType[c];
+    if (ft !== "none" && ft !== "steuerberater") {
+      frepMerchants += (countries[c]?.merchants || 0) * (pp.vendorPct?.[c] || 0);
+    }
+  });
+  const frepRev = frepMerchants * pp.frepFee * halfYear;
+  const regRev = newMerchants * pp.avgCountriesPerMerchant * pp.regFee;
+  const supportRev = totalReturns * pp.offProductRate * pp.correctiveFee;
+  const totalRev = filingRev + frepRev + regRev + supportRev;
+
+  // Filing COGS
+  const filingCOGS = cogsData.blended * totalReturns;
+
+  // Ancillary COGS
+  const regProcessing = newMerchants * pp.avgCountriesPerMerchant * pp.regProcessingCost;
+  const frepAdmin = frepMerchants * pp.frepAdminCost * halfYear;
+  const supportDelivery = totalReturns * pp.offProductRate * pp.supportInternalCost;
+  const ancillaryCOGS = regProcessing + frepAdmin + supportDelivery;
+
+  const totalCOGS = filingCOGS + ancillaryCOGS;
+  const grossProfit = totalRev - totalCOGS;
+  const gm = totalRev > 0 ? grossProfit / totalRev : 0;
+
+  // Vendor subtotals for display
+  let vendorDE=0,vendorNLpr=0,vendorNLann=0,vendorNLreg=0,vendorPL=0;
+  const deRet = countries.DE?.returns||0;
+  vendorDE = deRet * (pp.vendorPct?.DE||0) * pp.vendorDE * pp.EURUSD;
+  const nlRet = countries.NL?.returns||0;
+  vendorNLpr = nlRet * (pp.vendorPct?.NL||0) * pp.vendorNLPerReturn * pp.EURUSD;
+  const nlMerch = countries.NL?.merchants||0;
+  vendorNLann = nlMerch * (pp.vendorPct?.NL||0) * pp.vendorNLAnnual * pp.EURUSD * halfYear;
+  vendorNLreg = newMerchants * (pp.mix.NL||0)/100 * (pp.vendorPct?.NL||0) * pp.vendorNLReg * pp.EURUSD;
+  vendorPL = (countries.PL?.returns||0) * pp.vendorPL;
+  const totalVendor = vendorDE + vendorNLpr + vendorNLann + vendorNLreg + vendorPL;
+
+  // Variable subtotals
+  let totalVarBase=0, totalFrepPrem=0;
+  COUNTRIES.forEach(c => {
+    const cr = countries[c].returns;
+    totalVarBase += cr * (pp.platformVar + pp.cipVar);
+    const ft = pp.frepType[c];
+    const vPct = pp.vendorPct?.[c] || 0;
+    if(ft==="internal_frep") totalFrepPrem += cr * pp.frepPremium * vPct;
+    if(ft==="ioss") totalFrepPrem += cr * pp.iossPremium * vPct;
+  });
+
+  return {
+    ...vol, cogsData, fixedDetail,
+    filingRevStd, filingRevCpx, filingRev, frepRev, regRev, supportRev, totalRev,
+    filingCOGS, regProcessing, frepAdmin, supportDelivery, ancillaryCOGS, totalCOGS,
+    grossProfit, gm, frepMerchants,
+    vendorDE,vendorNLpr,vendorNLann,vendorNLreg,vendorPL,totalVendor,
+    totalVarBase, totalFrepPrem,
+    blendedCOGS: cogsData.blended, coreCOGS: cogsData.core,
+    avgRevPR: totalReturns>0?totalRev/totalReturns:0,
+    filingRevPR: totalReturns>0?filingRev/totalReturns:0,
+    filingGP: filingRev - filingCOGS,
+    filingGM: filingRev>0?(filingRev - filingCOGS)/filingRev:0,
+    discountPct
+  };
+}
+
+// Helper
+function calcWeightedFreq(p) {
+  let t=0; COUNTRIES.forEach(c=>t+=(p.mix[c]||0)/100*(p.filingFreq[c]||4)); return t;
+}
+
+// ─── UI PRIMITIVES ───
+const C = ({v,s={}}) => <td style={{padding:"5px 10px",textAlign:"right",fontSize:12,borderBottom:"1px solid #e5e5e5",...s}}>{v}</td>;
+const HC = ({v,s={}}) => <th style={{padding:"5px 10px",textAlign:"right",fontSize:11,fontWeight:600,borderBottom:"2px solid #d4d4d4",background:"#fafafa",position:"sticky",top:0,...s}}>{v}</th>;
+const LC = ({v,s={}}) => <td style={{padding:"5px 10px",textAlign:"left",fontSize:12,fontWeight:500,borderBottom:"1px solid #e5e5e5",...s}}>{v}</td>;
+const Sec = ({children}) => <tr><td colSpan={20} style={{padding:"10px 10px 4px",fontSize:12,fontWeight:700,color:"#1e40af",borderBottom:"2px solid #bfdbfe",background:"#eff6ff"}}>{children}</td></tr>;
+
+function Edit({value,onChange,pre="$",suf="",s={},dp=2}){
+  const [ed,setEd]=useState(false);const [tmp,setTmp]=useState(String(value));
+  if(ed) return <td style={{padding:1,borderBottom:"1px solid #e5e5e5",...s}}><input autoFocus value={tmp} onChange={e=>setTmp(e.target.value)} onBlur={()=>{onChange(parseFloat(tmp)||0);setEd(false);}} onKeyDown={e=>{if(e.key==="Enter"){onChange(parseFloat(tmp)||0);setEd(false);}}} style={{width:"100%",padding:"3px 6px",fontSize:12,textAlign:"right",border:"2px solid #2563eb",borderRadius:3,outline:"none",boxSizing:"border-box"}}/></td>;
+  return <td onClick={()=>{setTmp(String(value));setEd(true);}} style={{padding:"5px 10px",textAlign:"right",fontSize:12,borderBottom:"1px solid #e5e5e5",background:"#fefce8",cursor:"pointer",...s}} title="Click to edit">{pre}{typeof value==="number"?value.toFixed(dp):value}{suf}</td>;
+}
+
+const TabBtn = ({active,label,onClick}) => <button onClick={onClick} style={{padding:"7px 14px",fontSize:11,fontWeight:active?700:400,background:active?"#fff":"transparent",border:active?"1px solid #d4d4d4":"1px solid transparent",borderBottom:active?"1px solid #fff":"1px solid #d4d4d4",borderRadius:"6px 6px 0 0",cursor:"pointer",color:active?"#1e40af":"#737373",whiteSpace:"nowrap",marginBottom:"-1px"}}>{label}</button>;
+
+const KPI = ({label,value,sub,color}) => <div style={{background:"#fafafa",borderRadius:8,padding:"10px 14px",minWidth:130,border:"1px solid #e5e5e5"}}><div style={{fontSize:10,color:"#737373",textTransform:"uppercase",letterSpacing:".5px"}}>{label}</div><div style={{fontSize:18,fontWeight:700,color:color||"#171717",marginTop:2}}>{value}</div>{sub&&<div style={{fontSize:10,color:"#a3a3a3",marginTop:1}}>{sub}</div>}</div>;
+
+const Slider = ({value,onChange,min,max,step,label,displayValue}) => <div style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}><span style={{fontSize:11,color:"#525252",minWidth:130}}>{label}</span><input type="range" min={min} max={max} step={step} value={value} onChange={e=>onChange(parseFloat(e.target.value))} style={{flex:1,accentColor:"#2563eb",height:6}}/><span style={{fontSize:12,fontWeight:700,color:"#1e40af",minWidth:70,textAlign:"right"}}>{displayValue}</span></div>;
+
+// Row helpers for P&L
+const PRow = ({label,total,pr,bold,bg,color,indent}) => <tr style={{background:bg||"transparent"}}><LC v={label} s={{fontWeight:bold?700:400,paddingLeft:indent?24:10,color:color||"inherit"}}/><C v={fmt(total)} s={{fontWeight:bold?700:400,color:color||"inherit"}}/><C v={pr!=null?`$${pr.toFixed(2)}`:"—"} s={{fontWeight:bold?600:400,color:color||"#525252"}}/></tr>;
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 1: SCENARIO COMPARE
+// ═══════════════════════════════════════════════════════════
+function ScenarioCompare({p}) {
+  const [yi,setYi] = useState(1);
+  const [sliderVol,setSliderVol] = useState(null);
+  const active = sliderVol !== null;
+
+  const keys = Object.keys(SCENARIOS);
+  const results = keys.map(k => {
+    const sc = SCENARIOS[k];
+    return calcFullPnL(p, sc.adoptionByYear[yi], yi, sc.discountPct, sc.adoptionByYear);
+  });
+
+  const sliderRes = active ? (()=>{
+    const tam = p.totalMerchants*p.pctInternational;
+    const ia = sliderVol/(tam*calcWeightedFreq(p));
+    return calcFullPnL(p, Math.min(ia,0.5), yi, SCENARIOS.base.discountPct, SCENARIOS.base.adoptionByYear);
+  })() : null;
+
+  const rows = [
+    {l:"Adoption Rate",fn:r=>pct(r.activeMerchants/(p.totalMerchants*p.pctInternational))},
+    {l:"Active Merchants",fn:r=>fmtN(r.activeMerchants)},
+    {l:"Total Returns",fn:r=>fmtN(r.totalReturns),bold:true},
+    {l:"Avg Price/Return",fn:r=>`$${r.filingRevPR.toFixed(2)}`},
+    {l:"Filing Revenue",fn:r=>fmt(r.filingRev),bold:true,bg:"#eff6ff"},
+    {l:"Fixed Cost/Return",fn:r=>`$${r.fixedDetail.fixedPerReturn.toFixed(2)}`},
+    {l:"Variable Cost/Return",fn:r=>{const vc=r.cogsData.core-r.fixedDetail.fixedPerReturn;return `$${vc.toFixed(2)}`;}},
+    {l:"Vendor Cost/Return (blended)",fn:r=>`$${(r.blendedCOGS-r.coreCOGS).toFixed(2)}`},
+    {l:"Core COGS/Return",fn:r=>`$${r.coreCOGS.toFixed(2)}`,sub:"no vendors"},
+    {l:"All-In COGS/Return",fn:r=>`$${r.blendedCOGS.toFixed(2)}`,bold:true,color:"#b91c1c"},
+    {l:"Filing COGS",fn:r=>fmt(r.filingCOGS)},
+    {l:"Gross Profit",fn:r=>fmt(r.filingGP),bold:true,bg:"#f0fdf4"},
+    {l:"Gross Margin %",fn:r=>pct(r.filingGM),cfn:r=>gmC(r.filingGM),bold:true},
+  ];
+
+  return <div>
+    <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:16,flexWrap:"wrap"}}>
+      <span style={{fontSize:12,fontWeight:600}}>Year:</span>
+      {YEARS.map((y,i)=><button key={y} onClick={()=>setYi(i)} style={{padding:"5px 12px",fontSize:11,fontWeight:yi===i?700:400,background:yi===i?"#1e40af":"#f5f5f5",color:yi===i?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{y}{y===2026?" (½yr)":""}</button>)}
+    </div>
+
+    <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <KPI label="Year" value={YEARS[yi]} sub={yi===0?"Half-year":"Full year"}/>
+      <KPI label="Base Returns" value={fmtN(results[1].totalReturns)}/>
+      <KPI label="Base Avg Price/Ret" value={`$${results[1].filingRevPR.toFixed(2)}`}/>
+      <KPI label="Base GM%" value={pct(results[1].filingGM)} color={gmC(results[1].filingGM)}/>
+      <KPI label="Base Core COGS/Ret" value={`$${results[1].coreCOGS.toFixed(2)}`} sub="excl vendor"/>
+      <KPI label="Base All-In COGS/Ret" value={`$${results[1].blendedCOGS.toFixed(2)}`} sub="incl vendor"/>
+      <KPI label="FTEs needed" value={results[1].fixedDetail.ftesNeeded}/>
+    </div>
+
+    <div style={{overflowX:"auto",marginBottom:20}}>
+    <table style={{borderCollapse:"collapse",width:"100%"}}>
+      <thead><tr><HC v="Metric" s={{textAlign:"left",minWidth:170}}/>{keys.map(k=><HC key={k} v={SCENARIOS[k].label} s={{minWidth:110}}/>)}{active&&<HC v="Slider" s={{minWidth:110,color:"#7c3aed"}}/>}</tr></thead>
+      <tbody>{rows.map((row,ri)=><tr key={ri} style={{background:row.bg||"transparent"}}>
+        <LC v={<>{row.l}{row.sub&&<span style={{fontSize:10,color:"#a3a3a3",marginLeft:4}}>({row.sub})</span>}</>} s={{fontWeight:row.bold?600:400}}/>
+        {results.map((r,ci)=>{const c=row.cfn?row.cfn(r):(row.color||"inherit");return <C key={ci} v={row.fn(r)} s={{fontWeight:row.bold?700:400,color:c}}/>;})}
+        {active&&<C v={row.fn(sliderRes)} s={{fontWeight:row.bold?700:400,color:row.cfn?row.cfn(sliderRes):(row.color||"#7c3aed"),background:"#faf5ff"}}/>}
+      </tr>)}</tbody>
+    </table>
+    </div>
+
+    <div style={{background:"#faf5ff",borderRadius:8,padding:16,border:"1px solid #e9d5ff",marginBottom:16}}>
+      <h4 style={{fontSize:13,fontWeight:700,marginBottom:6,color:"#6d28d9"}}>Volume Sensitivity Slider</h4>
+      <p style={{fontSize:11,color:"#737373",marginBottom:8}}>Override volume to see how fixed cost dilution and margins change. Uses Base Case pricing.</p>
+      <button onClick={()=>setSliderVol(active?null:200000)} style={{padding:"4px 12px",fontSize:11,background:active?"#7c3aed":"#f5f5f5",color:active?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer",marginBottom:8}}>{active?"Disable":"Enable"} Slider</button>
+      {active&&<><Slider value={sliderVol} onChange={setSliderVol} min={10000} max={3000000} step={10000} label="Total Returns" displayValue={fmtN(sliderVol)}/>
+        <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
+          <KPI label="Avg Price/Ret" value={`$${sliderRes.filingRevPR.toFixed(2)}`}/>
+          <KPI label="Core COGS/Ret" value={`$${sliderRes.coreCOGS.toFixed(2)}`} color="#15803d"/>
+          <KPI label="All-In COGS/Ret" value={`$${sliderRes.blendedCOGS.toFixed(2)}`} color="#b91c1c"/>
+          <KPI label="Filing GM" value={pct(sliderRes.filingGM)} color={gmC(sliderRes.filingGM)}/>
+          <KPI label="FTEs" value={sliderRes.fixedDetail.ftesNeeded}/>
+        </div>
+      </>}
+    </div>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 2: 5-YEAR P&L (with $/return column)
+// ═══════════════════════════════════════════════════════════
+function PnLTab({p}) {
+  const [sel,setSel]=useState("base");
+  const sc=SCENARIOS[sel];
+  const data=YEARS.map((_,i)=>calcFullPnL(p,sc.adoptionByYear[i],i,sc.discountPct,sc.adoptionByYear));
+  const tot=k=>data.reduce((s,r)=>s+(r[k]||0),0);
+
+  // Show detailed P&L for selected year
+  const [detailYi,setDetailYi]=useState(1);
+  const d=data[detailYi];
+  const tr=d.totalReturns;
+  const pr=v=>tr>0?v/tr:0;
+
+  return <div>
+    <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+      {Object.entries(SCENARIOS).map(([k,v])=><button key={k} onClick={()=>setSel(k)} style={{padding:"5px 14px",fontSize:11,fontWeight:sel===k?700:400,background:sel===k?"#1e40af":"#f5f5f5",color:sel===k?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{v.label}</button>)}
+    </div>
+
+    <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+      <KPI label="5-Year Revenue" value={fmt(tot("totalRev"))}/>
+      <KPI label="5-Year GP" value={fmt(tot("grossProfit"))}/>
+      <KPI label="Avg GM%" value={pct(tot("totalRev")>0?tot("grossProfit")/tot("totalRev"):0)} color={gmC(tot("grossProfit")/tot("totalRev"))}/>
+      <KPI label="5-Year Returns" value={fmtN(tot("totalReturns"))}/>
+    </div>
+
+    {/* Compact 5-year summary */}
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:6}}>5-Year Summary — {sc.label}</h3>
+    <div style={{overflowX:"auto",marginBottom:20}}>
+    <table style={{borderCollapse:"collapse",width:"100%"}}>
+      <thead><tr><HC v="" s={{textAlign:"left"}}/>{YEARS.map(y=><HC key={y} v={y+(y===2026?" (½yr)":"")}/>)}<HC v="Total"/></tr></thead>
+      <tbody>
+        <tr><LC v="Adoption"/>{data.map((r,i)=><C key={i} v={pct(r.activeMerchants/(p.totalMerchants*p.pctInternational))}/>)}<C v=""/></tr>
+        <tr><LC v="Merchants"/>{data.map((r,i)=><C key={i} v={fmtN(r.activeMerchants)}/>)}<C v=""/></tr>
+        <tr><LC v="Returns" s={{fontWeight:600}}/>{data.map((r,i)=><C key={i} v={fmtN(r.totalReturns)} s={{fontWeight:600}}/>)}<C v={fmtN(tot("totalReturns"))} s={{fontWeight:600}}/></tr>
+        <tr><LC v="FTEs"/>{data.map((r,i)=><C key={i} v={r.fixedDetail.ftesNeeded}/>)}<C v=""/></tr>
+        <tr style={{background:"#eff6ff"}}><LC v="Revenue" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.totalRev)} s={{fontWeight:700}}/>)}<C v={fmt(tot("totalRev"))} s={{fontWeight:700}}/></tr>
+        <tr style={{background:"#fef2f2"}}><LC v="Total COGS" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.totalCOGS)} s={{fontWeight:700}}/>)}<C v={fmt(tot("totalCOGS"))} s={{fontWeight:700}}/></tr>
+        <tr style={{background:"#f0fdf4"}}><LC v="Gross Profit" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.grossProfit)} s={{fontWeight:700}}/>)}<C v={fmt(tot("grossProfit"))} s={{fontWeight:700}}/></tr>
+        <tr><LC v="GM%" s={{fontWeight:600}}/>{data.map((r,i)=><C key={i} v={pct(r.gm)} s={{color:gmC(r.gm),fontWeight:700}}/>)}<C v={pct(tot("totalRev")>0?tot("grossProfit")/tot("totalRev"):0)} s={{fontWeight:700}}/></tr>
+        <tr><LC v="Core COGS/Ret"/>{data.map((r,i)=><C key={i} v={`$${r.coreCOGS.toFixed(2)}`}/>)}<C v=""/></tr>
+        <tr><LC v="All-In COGS/Ret"/>{data.map((r,i)=><C key={i} v={`$${r.blendedCOGS.toFixed(2)}`} s={{color:"#b91c1c"}}/>)}<C v=""/></tr>
+      </tbody>
+    </table>
+    </div>
+
+    {/* Detailed single-year P&L with $/return */}
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+      <span style={{fontSize:12,fontWeight:600}}>Detailed P&L for:</span>
+      {YEARS.map((y,i)=><button key={y} onClick={()=>setDetailYi(i)} style={{padding:"4px 10px",fontSize:11,fontWeight:detailYi===i?700:400,background:detailYi===i?"#1e40af":"#f5f5f5",color:detailYi===i?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{y}</button>)}
+    </div>
+    <div style={{overflowX:"auto"}}>
+    <table style={{borderCollapse:"collapse",width:"100%",maxWidth:600}}>
+      <thead><tr><HC v="" s={{textAlign:"left",minWidth:220}}/><HC v="Total"/><HC v="$/Return"/></tr></thead>
+      <tbody>
+        <Sec>Revenue</Sec>
+        <PRow label="Filing — Standard Countries" total={d.filingRevStd} pr={pr(d.filingRevStd)}/>
+        <PRow label="Filing — Complex Countries" total={d.filingRevCpx} pr={pr(d.filingRevCpx)}/>
+        <PRow label="FREP Fees" total={d.frepRev} pr={pr(d.frepRev)}/>
+        <PRow label="Registration Fees" total={d.regRev} pr={pr(d.regRev)}/>
+        <PRow label="Off-Product Support" total={d.supportRev} pr={pr(d.supportRev)}/>
+        <PRow label="TOTAL REVENUE" total={d.totalRev} pr={d.avgRevPR} bold bg="#eff6ff"/>
+
+        <Sec>Fixed Costs (SHOP share: {pct(d.fixedDetail.shopShare)})</Sec>
+        <PRow label={`Compliance Team (${d.fixedDetail.ftesNeeded} FTEs: ${p.currentFTEs} + ${d.fixedDetail.additionalFTEs} new)`} total={d.fixedDetail.complianceCost*d.fixedDetail.shopShare} pr={pr(d.fixedDetail.complianceCost*d.fixedDetail.shopShare)} indent/>
+        <PRow label="Infrastructure (AWS)" total={d.fixedDetail.infraFixed*d.fixedDetail.shopShare} pr={pr(d.fixedDetail.infraFixed*d.fixedDetail.shopShare)} indent/>
+        <PRow label="Symansis Licenses" total={d.fixedDetail.symansis*d.fixedDetail.shopShare} pr={pr(d.fixedDetail.symansis*d.fixedDetail.shopShare)} indent/>
+        <PRow label="FREP Risk Reserve" total={d.fixedDetail.frepReserve*d.fixedDetail.shopShare} pr={pr(d.fixedDetail.frepReserve*d.fixedDetail.shopShare)} indent/>
+        <PRow label="TOTAL FIXED (SHOP)" total={d.fixedDetail.shopFixedCost} pr={d.fixedDetail.fixedPerReturn} bold bg="#fefce8"/>
+
+        <Sec>Variable Costs</Sec>
+        <PRow label="Platform + CIP Compute" total={d.totalVarBase} pr={p.platformVar+p.cipVar} indent/>
+        <PRow label="FREP/IOSS Premiums" total={d.totalFrepPrem} pr={tr>0?d.totalFrepPrem/tr:0} indent/>
+        <PRow label="TOTAL VARIABLE" total={d.totalVarBase+d.totalFrepPrem} pr={tr>0?(d.totalVarBase+d.totalFrepPrem)/tr:0} bold bg="#fefce8"/>
+
+        <Sec>Country Vendor Costs</Sec>
+        <PRow label="DE Steuerberater" total={d.vendorDE} pr={tr>0?d.vendorDE/tr:0} indent/>
+        <PRow label="NL FREP Per-Return" total={d.vendorNLpr} pr={tr>0?d.vendorNLpr/tr:0} indent/>
+        <PRow label="NL FREP Annual" total={d.vendorNLann} pr={tr>0?d.vendorNLann/tr:0} indent/>
+        <PRow label="NL Registration" total={d.vendorNLreg} pr={tr>0?d.vendorNLreg/tr:0} indent/>
+        <PRow label="PL Translation" total={d.vendorPL} pr={tr>0?d.vendorPL/tr:0} indent/>
+        <PRow label="TOTAL VENDOR" total={d.totalVendor} pr={tr>0?d.totalVendor/tr:0} bold bg="#fef2f2" color="#b91c1c"/>
+
+        <Sec>Ancillary COGS</Sec>
+        <PRow label="Registration Processing" total={d.regProcessing} pr={pr(d.regProcessing)} indent/>
+        <PRow label="FREP Administration" total={d.frepAdmin} pr={pr(d.frepAdmin)} indent/>
+        <PRow label="Support Delivery" total={d.supportDelivery} pr={pr(d.supportDelivery)} indent/>
+        <PRow label="TOTAL ANCILLARY" total={d.ancillaryCOGS} pr={pr(d.ancillaryCOGS)} bold bg="#fefce8"/>
+
+        <tr style={{borderTop:"3px solid #171717"}}><td colSpan={3} style={{height:4}}/></tr>
+        <PRow label="TOTAL COGS" total={d.totalCOGS} pr={tr>0?d.totalCOGS/tr:0} bold bg="#fef2f2"/>
+        <PRow label="GROSS PROFIT" total={d.grossProfit} pr={tr>0?d.grossProfit/tr:0} bold bg="#f0fdf4" color="#15803d"/>
+        <tr style={{background:"#f0fdf4"}}><LC v="GROSS MARGIN %" s={{fontWeight:700}}/><C v={pct(d.gm)} s={{fontWeight:700,color:gmC(d.gm)}}/><C v=""/></tr>
+
+        <Sec>Key Metrics</Sec>
+        <tr><LC v="Core COGS/Return (fixed + variable)"/><C v=""/><C v={`$${d.coreCOGS.toFixed(2)}`} s={{fontWeight:700,color:"#15803d"}}/></tr>
+        <tr><LC v="All-In COGS/Return (everything)"/><C v=""/><C v={`$${d.blendedCOGS.toFixed(2)}`} s={{fontWeight:700,color:"#b91c1c"}}/></tr>
+        <tr><LC v="Revenue/Return (blended)"/><C v=""/><C v={`$${d.avgRevPR.toFixed(2)}`} s={{fontWeight:700}}/></tr>
+        <tr><LC v="Gross Profit/Return"/><C v=""/><C v={`$${(tr>0?d.grossProfit/tr:0).toFixed(2)}`} s={{fontWeight:700,color:"#15803d"}}/></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 3: ASSUMPTIONS
+// ═══════════════════════════════════════════════════════════
+function AssumptionsTab({p,setP,mix,setMix,vendorPct,setVendorPct}) {
+  const up=(k,v)=>setP(x=>({...x,[k]:v}));
+  const otherSum=COUNTRIES.filter(x=>x!=="UK").reduce((s,x)=>s+(mix[x]||0),0);
+
+  return <div style={{fontSize:12}}>
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>A. Market & Adoption</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:16}}>
+      <tbody>
+        <tr><LC v="Total SHOP Merchants"/><Edit value={p.totalMerchants} onChange={v=>up("totalMerchants",v)} pre="" dp={0}/><LC v="" s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="% International"/><Edit value={p.pctInternational*100} onChange={v=>up("pctInternational",v/100)} pre="" suf="%" dp={0}/><LC v={`TAM = ${fmtN(p.totalMerchants*p.pctInternational)}`} s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Contract Term (years)"/><Edit value={p.contractTerm} onChange={v=>up("contractTerm",v)} pre="" dp={0}/></tr>
+        <tr><LC v="Avg Countries/Merchant"/><Edit value={p.avgCountriesPerMerchant} onChange={v=>up("avgCountriesPerMerchant",v)} pre="" dp={0}/><LC v="For registration revenue" s={{color:"#737373",fontSize:11}}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>B. Fixed Costs</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:8}}>
+      <tbody>
+        <tr><LC v="Current FTEs"/><Edit value={p.currentFTEs} onChange={v=>up("currentFTEs",v)} pre="" dp={0}/><LC v={`Current capacity: ${fmtN(p.currentFTEs * p.returnsPerFTE)} ret/yr`} s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Returns per FTE (capacity)"/><Edit value={p.returnsPerFTE} onChange={v=>up("returnsPerFTE",v)} pre="" dp={0}/><LC v={`Headroom for SHOP: ${fmtN(Math.max(0, p.currentFTEs * p.returnsPerFTE - p.existingVolume))} before hiring`} s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Cost per FTE ($/yr)"/><Edit value={p.fteCost} onChange={v=>up("fteCost",v)} dp={0}/><LC v="Fully loaded annual cost per person" s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Existing volume (non-SHOP ret/yr)"/><Edit value={p.existingVolume} onChange={v=>up("existingVolume",v)} pre="" dp={0}/></tr>
+        <tr><LC v="AWS infrastructure fixed ($/yr)"/><Edit value={p.infraFixed} onChange={v=>up("infraFixed",v)} dp={0}/></tr>
+        <tr><LC v="Symansis DE (€/yr)"/><Edit value={p.symansisDE} onChange={v=>up("symansisDE",v)} pre="€" dp={0}/></tr>
+        <tr><LC v="Symansis SVR (€/yr)"/><Edit value={p.symansisSVR} onChange={v=>up("symansisSVR",v)} pre="€" dp={0}/></tr>
+        <tr><LC v="FREP risk reserve ($/yr)"/><Edit value={p.frepReserve} onChange={v=>up("frepReserve",v)} dp={0}/></tr>
+        <tr><LC v="Cost inflation (%/yr)"/><Edit value={p.costInflation*100} onChange={v=>up("costInflation",v/100)} pre="" suf="%" dp={1}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>C. Variable Costs</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:16}}>
+      <tbody>
+        <tr><LC v="Platform compute ($/return)"/><Edit value={p.platformVar} onChange={v=>up("platformVar",v)}/></tr>
+        <tr><LC v="CIP batch compute ($/return)"/><Edit value={p.cipVar} onChange={v=>up("cipVar",v)}/></tr>
+        <tr><LC v="FREP country premium ($/return)"/><Edit value={p.frepPremium} onChange={v=>up("frepPremium",v)}/><LC v="FR, PL, ES, IT" s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="IOSS premium ($/return)"/><Edit value={p.iossPremium} onChange={v=>up("iossPremium",v)}/><LC v="IOSS only" s={{color:"#737373",fontSize:11}}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>D. Country Vendor Costs</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:16}}>
+      <tbody>
+        <tr><LC v="DE Steuerberater (€/return)"/><Edit value={p.vendorDE} onChange={v=>up("vendorDE",v)} pre="€"/></tr>
+        <tr><LC v="NL FREP per-return (€/return)"/><Edit value={p.vendorNLPerReturn} onChange={v=>up("vendorNLPerReturn",v)} pre="€"/></tr>
+        <tr><LC v="NL FREP annual (€/merchant/yr)"/><Edit value={p.vendorNLAnnual} onChange={v=>up("vendorNLAnnual",v)} pre="€"/></tr>
+        <tr><LC v="NL FREP registration (€/merchant)"/><Edit value={p.vendorNLReg} onChange={v=>up("vendorNLReg",v)} pre="€"/></tr>
+        <tr><LC v="PL translation ($/return)"/><Edit value={p.vendorPL} onChange={v=>up("vendorPL",v)}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>E. Pricing</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:16}}>
+      <tbody>
+        <tr><LC v="Standard price ($/return)"/><Edit value={p.standardPrice} onChange={v=>up("standardPrice",v)}/><LC v="UK, BE, CZ, CA" s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Complex price ($/return)"/><Edit value={p.complexPrice} onChange={v=>up("complexPrice",v)}/><LC v="DE, FR, NL, PL, ES, IT, IOSS" s={{color:"#737373",fontSize:11}}/></tr>
+        <tr><LC v="Target gross margin"/><Edit value={p.targetGM*100} onChange={v=>up("targetGM",v/100)} pre="" suf="%" dp={0}/></tr>
+        <tr><LC v="Max discount"/><Edit value={p.maxDiscount*100} onChange={v=>up("maxDiscount",v/100)} pre="" suf="%" dp={0}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>F. Ancillary Services</h3>
+    <table style={{borderCollapse:"collapse",marginBottom:16}}>
+      <tbody>
+        <tr><LC v="FREP fee ($/merchant/yr)"/><Edit value={p.frepFee} onChange={v=>up("frepFee",v)}/></tr>
+        <tr><LC v="Registration fee ($/country)"/><Edit value={p.regFee} onChange={v=>up("regFee",v)}/></tr>
+        <tr><LC v="Reg processing cost ($/reg)"/><Edit value={p.regProcessingCost} onChange={v=>up("regProcessingCost",v)}/></tr>
+        <tr><LC v="FREP admin cost ($/merchant/yr)"/><Edit value={p.frepAdminCost} onChange={v=>up("frepAdminCost",v)}/></tr>
+        <tr><LC v="Off-product support rate (% returns)"/><Edit value={p.offProductRate*100} onChange={v=>up("offProductRate",v/100)} pre="" suf="%" dp={1}/></tr>
+        <tr><LC v="Off-product fee ($/hour)"/><Edit value={p.correctiveFee} onChange={v=>up("correctiveFee",v)}/></tr>
+        <tr><LC v="Off-product internal cost ($/hour)"/><Edit value={p.supportInternalCost} onChange={v=>up("supportInternalCost",v)}/></tr>
+      </tbody>
+    </table>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>G. Country Mix, Filing Frequency, FREP & Complexity</h3>
+    <div style={{overflowX:"auto",marginBottom:16}}>
+    <table style={{borderCollapse:"collapse"}}>
+      <thead><tr><HC v="Country" s={{textAlign:"left"}}/><HC v="Mix %"/><HC v="Freq (ret/yr)"/><HC v="FREP/Vendor Type"/><HC v="% Req. FREP/Vendor"/><HC v="Complex?"/></tr></thead>
+      <tbody>{COUNTRIES.map(c=>{
+        const isUK=c==="UK";const ukVal=Math.max(0,100-otherSum);
+        const ft=p.frepType[c];const isNone=ft==="none";
+        return <tr key={c} style={{background:isUK?"#dbeafe":"transparent"}}>
+          <LC v={CLABELS[c]} s={{fontWeight:isUK?600:400}}/>
+          {isUK?<C v={`${ukVal}%`} s={{fontWeight:700,color:"#1e40af"}}/>:
+            <td style={{padding:1,borderBottom:"1px solid #e5e5e5"}}><input type="number" value={mix[c]} onChange={e=>setMix(x=>({...x,[c]:parseFloat(e.target.value)||0}))} style={{width:50,textAlign:"right",border:"1px solid #d4d4d4",borderRadius:3,padding:"3px 4px",fontSize:11,background:"#fefce8"}}/></td>}
+          <td style={{padding:1,borderBottom:"1px solid #e5e5e5"}}><input type="number" value={p.filingFreq[c]||4} onChange={e=>{const v=parseInt(e.target.value)||1;up("filingFreq",{...p.filingFreq,[c]:v});}} style={{width:45,textAlign:"right",border:"1px solid #d4d4d4",borderRadius:3,padding:"3px 4px",fontSize:11,background:"#fefce8"}}/></td>
+          <td style={{padding:1,borderBottom:"1px solid #e5e5e5"}}><select value={ft} onChange={e=>{up("frepType",{...p.frepType,[c]:e.target.value});if(e.target.value==="none")setVendorPct(x=>({...x,[c]:0}));}} style={{fontSize:11,border:"1px solid #d4d4d4",borderRadius:3,padding:"3px 4px",background:"#fefce8",cursor:"pointer"}}>
+            <option value="none">None</option>
+            <option value="internal_frep">Internal FREP</option>
+            <option value="external_frep">External FREP</option>
+            <option value="steuerberater">Steuerberater</option>
+            <option value="ioss">IOSS Intermediary</option>
+          </select></td>
+          <td style={{padding:1,borderBottom:"1px solid #e5e5e5"}}>
+            {isNone
+              ? <span style={{padding:"3px 8px",fontSize:11,color:"#a3a3a3"}}>0%</span>
+              : <input type="number" min={0} max={100} value={Math.round((vendorPct[c]||0)*100)} onChange={e=>setVendorPct(x=>({...x,[c]:Math.min(1,Math.max(0,(parseFloat(e.target.value)||0)/100))}))} style={{width:50,textAlign:"right",border:"1px solid #d4d4d4",borderRadius:3,padding:"3px 4px",fontSize:11,background:"#fefce8"}}/>
+            }
+          </td>
+          <td style={{padding:1,borderBottom:"1px solid #e5e5e5"}}><select value={p.complexCountries[c]?"yes":"no"} onChange={e=>{up("complexCountries",{...p.complexCountries,[c]:e.target.value==="yes"});}} style={{fontSize:11,border:"1px solid #d4d4d4",borderRadius:3,padding:"3px 4px",background:"#fefce8",cursor:"pointer"}}>
+            <option value="no">No</option>
+            <option value="yes">Yes</option>
+          </select></td>
+        </tr>;})}</tbody>
+    </table>
+    </div>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>H. FX Rates</h3>
+    <div style={{display:"grid",gridTemplateColumns:"150px 80px",gap:"4px 16px",maxWidth:300}}>
+      <span>EUR/USD</span><span style={{fontWeight:600}}>{p.EURUSD}</span>
+      <span>GBP/USD</span><span style={{fontWeight:600}}>{p.GBPUSD}</span>
+    </div>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 4: COST BREAKDOWN
+// ═══════════════════════════════════════════════════════════
+function CostBreakdown({p}) {
+  const [mode,setMode]=useState("blended");
+  const [selC,setSelC]=useState("UK");
+  const [refVol,setRefVol]=useState(500000);
+
+  const tam=p.totalMerchants*p.pctInternational;
+  const ia=refVol/(tam*calcWeightedFreq(p));
+  const vol=calcVolume({...p,scenarioAdoption:SCENARIOS.base.adoptionByYear},Math.min(ia,0.5),1);
+  const trUsed=vol.totalReturns>0?vol.totalReturns:refVol;
+  const cogsData=calcBlendedCOGS(trUsed,vol.countries,p,1);
+  const fixedD=calcFixedCosts(trUsed,p,1);
+  const shopSh=fixedD.shopShare;
+
+  // Vendor sub-totals (actual dollar amounts)
+  const deRet=vol.countries.DE?.returns||0, nlRet=vol.countries.NL?.returns||0;
+  const nlMerch=vol.countries.NL?.merchants||0, plRet=vol.countries.PL?.returns||0;
+  const vendorDEtotal=deRet*p.vendorDE*p.EURUSD;
+  const vendorNLprTotal=nlRet*p.vendorNLPerReturn*p.EURUSD;
+  const vendorNLannTotal=nlMerch*p.vendorNLAnnual*p.EURUSD;
+  const vendorNLregTotal=nlMerch*p.vendorNLReg*p.EURUSD/p.contractTerm;
+  const vendorPLtotal=plRet*p.vendorPL;
+  const vendorAllTotal=vendorDEtotal+vendorNLprTotal+vendorNLannTotal+vendorNLregTotal+vendorPLtotal;
+
+  // Variable sub-totals
+  let totalPlatCIP=0,totalFrepPrem=0,totalIOSSPrem=0;
+  COUNTRIES.forEach(c=>{const cr=vol.countries[c]?.returns||0;totalPlatCIP+=cr*(p.platformVar+p.cipVar);const vPct=p.vendorPct?.[c]||0;if(p.frepType[c]==="internal_frep")totalFrepPrem+=cr*p.frepPremium*vPct;if(p.frepType[c]==="ioss")totalIOSSPrem+=cr*p.iossPremium*vPct;});
+
+  const totalAllIn=fixedD.shopFixedCost+totalPlatCIP+totalFrepPrem+totalIOSSPrem+vendorAllTotal;
+  const allInPR=trUsed>0?totalAllIn/trUsed:0;
+  const corePR=trUsed>0?(fixedD.shopFixedCost+totalPlatCIP+totalFrepPrem+totalIOSSPrem)/trUsed:0;
+
+  // Waterfall row helper
+  const WR=({label,total,perRet,pctOf,indent,bold,bg,color,sep})=><tr style={{background:bg||"transparent",borderTop:sep?"2px solid #d4d4d4":"none"}}>
+    <LC v={label} s={{fontWeight:bold?700:400,paddingLeft:indent?28:10,color:color||"inherit"}}/>
+    <C v={total!=null?fmt(total):"—"} s={{fontWeight:bold?700:400,color:color||"inherit"}}/>
+    <C v={perRet!=null?`$${perRet.toFixed(2)}`:"—"} s={{fontWeight:bold?700:400,color:color||"inherit"}}/>
+    <C v={pctOf!=null?pct(pctOf):"—"} s={{color:"#737373"}}/>
+  </tr>;
+
+  return <div>
+    <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+      <button onClick={()=>setMode("blended")} style={{padding:"5px 14px",fontSize:11,fontWeight:mode==="blended"?700:400,background:mode==="blended"?"#1e40af":"#f5f5f5",color:mode==="blended"?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>All Countries (Blended)</button>
+      <button onClick={()=>setMode("single")} style={{padding:"5px 14px",fontSize:11,fontWeight:mode==="single"?700:400,background:mode==="single"?"#1e40af":"#f5f5f5",color:mode==="single"?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>Single Country</button>
+      {mode==="single"&&COUNTRIES.map(c=><button key={c} onClick={()=>setSelC(c)} style={{padding:"3px 8px",fontSize:10,fontWeight:selC===c?700:400,background:selC===c?"#7c3aed":"#f5f5f5",color:selC===c?"#fff":"#525252",border:"none",borderRadius:3,cursor:"pointer"}}>{c}</button>)}
+    </div>
+    <Slider value={refVol} onChange={v=>setRefVol(Math.round(v))} min={10000} max={3000000} step={10000} label="Reference Volume" displayValue={fmtN(refVol)}/>
+
+    {mode==="single" ? (()=>{
+      const cost=calcCountryCost(selC,trUsed,p,1);
+      const fd=cost.fixedDetail;
+      const ft=p.frepType[selC];
+      const vPct=p.vendorPct?.[selC]||0;
+      const totalPR=cost.total;
+      const cMerch=vol.countries[selC]?.merchants||0;
+      const cRet=vol.countries[selC]?.returns||0;
+      // FREP premium detail
+      const frepMerch=Math.round(cMerch*vPct);
+      const frepRet=Math.round(frepMerch*(p.filingFreq[selC]||4));
+      let premRate=0,premLabel="";
+      if(ft==="internal_frep"){premRate=p.frepPremium;premLabel="FREP compliance premium";}
+      if(ft==="ioss"){premRate=p.iossPremium;premLabel="IOSS intermediary premium";}
+      const premTotal=frepRet*premRate;
+      const premPR=cRet>0?premTotal/cRet:0;
+      // Vendor detail
+      const vendMerch=Math.round(cMerch*vPct);
+      const vendRet=Math.round(vendMerch*(p.filingFreq[selC]||4));
+      const nlPRtot=ft==="external_frep"?vendRet*p.vendorNLPerReturn*p.EURUSD:0;
+      const nlAnnTot=ft==="external_frep"?vendMerch*p.vendorNLAnnual*p.EURUSD:0;
+      const nlRegTot=ft==="external_frep"?vendMerch*p.vendorNLReg*p.EURUSD/p.contractTerm:0;
+      const deTot=ft==="steuerberater"?vendRet*p.vendorDE*p.EURUSD:0;
+      const plTot=selC==="PL"?cRet*p.vendorPL:0;
+      const vendTotal=deTot+nlPRtot+nlAnnTot+nlRegTot+plTot;
+      const vendPR=cRet>0?vendTotal/cRet:0;
+      const fixedTot=cost.fixed*cRet;
+      const varTot=(p.platformVar+p.cipVar)*cRet;
+      const grandTotal=fixedTot+varTot+premTotal+vendTotal;
+
+      return <div style={{marginTop:12}}>
+        <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>{CLABELS[selC]} ({selC}) — Cost Per Return Breakdown</h3>
+        <div style={{fontSize:11,color:"#737373",marginBottom:10}}>Merchants: {fmtN(cMerch)} | Returns: {fmtN(cRet)} | FREP/Vendor %: {Math.round(vPct*100)}%</div>
+        <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+          <KPI label="Total COGS/Return" value={`$${totalPR.toFixed(2)}`}/>
+          <KPI label="Core (fixed+var)" value={`$${(cost.fixed+cost.variable).toFixed(2)}`} color="#15803d"/>
+          <KPI label="FREP Premium" value={`$${premPR.toFixed(3)}`} color={premPR>0?"#b45309":"#a3a3a3"}/>
+          <KPI label="Vendor" value={`$${vendPR.toFixed(2)}`} color={vendPR>1?"#b91c1c":"#a3a3a3"}/>
+          <KPI label="FTEs" value={fd.ftesNeeded}/>
+        </div>
+        <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",maxWidth:660}}>
+          <thead><tr><HC v="Component" s={{textAlign:"left",minWidth:280}}/><HC v="$/Return"/><HC v="Total ($)"/><HC v="% of Total"/></tr></thead>
+          <tbody>
+            <Sec>Fixed Costs (allocated by platform share)</Sec>
+            <WR label={<span>Compliance team<div style={{fontSize:10,color:"#737373",fontWeight:400,marginTop:2}}>{fd.ftesNeeded} FTEs: {p.currentFTEs} existing{fd.additionalFTEs>0&&<> + {fd.additionalFTEs} new × ${fmtN(p.fteCost)}/yr</>} — {selC} share: {trUsed>0?pct(cRet/trUsed):""}</div></span>} perRet={trUsed>0?(fd.complianceCost*fd.shopShare)/trUsed:0} total={cRet*(trUsed>0?(fd.complianceCost*fd.shopShare)/trUsed:0)} pctOf={totalPR>0?((trUsed>0?(fd.complianceCost*fd.shopShare)/trUsed:0))/totalPR:0} indent/>
+            <WR label="AWS infrastructure" perRet={trUsed>0?(fd.infraFixed*fd.shopShare)/trUsed:0} total={cRet*(trUsed>0?(fd.infraFixed*fd.shopShare)/trUsed:0)} pctOf={totalPR>0?((trUsed>0?(fd.infraFixed*fd.shopShare)/trUsed:0))/totalPR:0} indent/>
+            <WR label="Symansis licenses" perRet={trUsed>0?(fd.symansis*fd.shopShare)/trUsed:0} total={cRet*(trUsed>0?(fd.symansis*fd.shopShare)/trUsed:0)} pctOf={totalPR>0?((trUsed>0?(fd.symansis*fd.shopShare)/trUsed:0))/totalPR:0} indent/>
+            <WR label="FREP risk reserve" perRet={trUsed>0?(fd.frepReserve*fd.shopShare)/trUsed:0} total={cRet*(trUsed>0?(fd.frepReserve*fd.shopShare)/trUsed:0)} pctOf={totalPR>0?((trUsed>0?(fd.frepReserve*fd.shopShare)/trUsed:0))/totalPR:0} indent/>
+            <WR label="SUBTOTAL FIXED" perRet={cost.fixed} total={fixedTot} pctOf={totalPR>0?cost.fixed/totalPR:0} bold bg="#fefce8"/>
+
+            <Sec>Variable Costs (base — every return)</Sec>
+            <WR label="Platform compute" perRet={p.platformVar} total={p.platformVar*cRet} pctOf={totalPR>0?p.platformVar/totalPR:0} indent/>
+            <WR label="CIP batch compute" perRet={p.cipVar} total={p.cipVar*cRet} pctOf={totalPR>0?p.cipVar/totalPR:0} indent/>
+            <WR label="SUBTOTAL VARIABLE" perRet={p.platformVar+p.cipVar} total={varTot} pctOf={totalPR>0?(p.platformVar+p.cipVar)/totalPR:0} bold bg="#fefce8"/>
+
+            <Sec>FREP/Vendor Premium</Sec>
+            {premRate>0 ? <>
+              <WR label={premLabel} perRet={premPR} total={premTotal} pctOf={totalPR>0?premPR/totalPR:0} indent color="#b45309"/>
+              <tr><td colSpan={4} style={{padding:"2px 28px 6px",fontSize:10,color:"#a3a3a3",borderBottom:"1px solid #e5e5e5"}}>
+                {fmtN(frepMerch)} FREP merchants × {p.filingFreq[selC]} ret × ${premRate.toFixed(2)} = {fmt(premTotal)} ÷ {fmtN(cRet)} total returns
+              </td></tr>
+            </> : <tr><td colSpan={4} style={{padding:"6px 28px",fontSize:11,color:"#a3a3a3",borderBottom:"1px solid #e5e5e5"}}>
+              {ft==="steuerberater"?"No FREP premium — Steuerberater is a vendor cost, not FREP.":ft==="external_frep"?"No FREP premium — external FREP (third party bears risk).":"No FREP premium — not applicable."}
+            </td></tr>}
+            <WR label="SUBTOTAL FREP PREMIUM" perRet={premPR} total={premTotal} pctOf={totalPR>0?premPR/totalPR:0} bold bg="#fff7ed"/>
+
+            <Sec>Country Vendor Costs</Sec>
+            {vendTotal>0 ? <>
+              {ft==="steuerberater"&&<>
+                <WR label={`Steuerberater (€${p.vendorDE} × $${p.EURUSD})`} perRet={cRet>0?deTot/cRet:0} total={deTot} pctOf={totalPR>0&&cRet>0?(deTot/cRet)/totalPR:0} indent color="#b91c1c"/>
+                <tr><td colSpan={4} style={{padding:"2px 28px 6px",fontSize:10,color:"#a3a3a3",borderBottom:"1px solid #e5e5e5"}}>
+                  {fmtN(vendMerch)} merchants × {p.filingFreq[selC]} ret × ${(p.vendorDE*p.EURUSD).toFixed(2)} = {fmt(deTot)}
+                </td></tr>
+              </>}
+              {ft==="external_frep"&&<>
+                <WR label="FREP per-return fee" perRet={cRet>0?nlPRtot/cRet:0} total={nlPRtot} pctOf={totalPR>0&&cRet>0?(nlPRtot/cRet)/totalPR:0} indent color="#b91c1c"/>
+                <WR label="FREP annual retainer" perRet={cRet>0?nlAnnTot/cRet:0} total={nlAnnTot} pctOf={totalPR>0&&cRet>0?(nlAnnTot/cRet)/totalPR:0} indent color="#b91c1c"/>
+                <WR label="FREP registration (amortized)" perRet={cRet>0?nlRegTot/cRet:0} total={nlRegTot} pctOf={totalPR>0&&cRet>0?(nlRegTot/cRet)/totalPR:0} indent color="#b91c1c"/>
+                <tr><td colSpan={4} style={{padding:"2px 28px 6px",fontSize:10,color:"#a3a3a3",borderBottom:"1px solid #e5e5e5"}}>
+                  {fmtN(vendMerch)} FREP merchants of {fmtN(cMerch)} total ({Math.round(vPct*100)}%)
+                </td></tr>
+              </>}
+              {selC==="PL"&&<WR label="Translation/courier" perRet={p.vendorPL} total={plTot} pctOf={totalPR>0?p.vendorPL/totalPR:0} indent color="#b91c1c"/>}
+            </> : <tr><td colSpan={4} style={{padding:"6px 28px",fontSize:11,color:"#a3a3a3",borderBottom:"1px solid #e5e5e5"}}>No vendor costs required for {CLABELS[selC]}.</td></tr>}
+            <WR label="SUBTOTAL VENDOR" perRet={vendPR} total={vendTotal} pctOf={totalPR>0?vendPR/totalPR:0} bold bg="#fef2f2" color="#b91c1c"/>
+
+            <WR label="TOTAL COGS" perRet={totalPR} total={grandTotal} pctOf={1} bold bg="#eff6ff" sep/>
+          </tbody>
+        </table>
+        </div>
+        {vPct>0&&<p style={{fontSize:11,color:"#525252",marginTop:10}}>
+          {Math.round(vPct*100)}% of {CLABELS[selC]} merchants ({fmtN(vendMerch)} of {fmtN(cMerch)}) require {ft==="steuerberater"?"Avalara's Steuerberater":ft==="external_frep"?"fiscal representation":ft==="ioss"?"IOSS intermediary":"FREP services"}.
+          {ft==="steuerberater"&&` Remaining ${100-Math.round(vPct*100)}% (${fmtN(cMerch-vendMerch)}) provide their own ELSTER credentials.`}
+          {ft==="external_frep"&&` Remaining ${100-Math.round(vPct*100)}% (${fmtN(cMerch-vendMerch)}) file directly.`}
+          {ft==="internal_frep"&&` Remaining ${100-Math.round(vPct*100)}% (${fmtN(cMerch-vendMerch)}) file without fiscal representation.`}
+        </p>}
+        <div style={{marginTop:16,display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11,fontWeight:600,minWidth:90}}>Composition:</span>
+          <div style={{flex:1,height:30,display:"flex",borderRadius:4,overflow:"hidden",maxWidth:500}}>
+            <div style={{width:`${totalPR>0?(cost.fixed/totalPR)*100:0}%`,background:"#2563eb",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:9,color:"#fff",fontWeight:600}}>{totalPR>0&&cost.fixed/totalPR>.06?`$${cost.fixed.toFixed(2)}`:""}</span></div>
+            <div style={{width:`${totalPR>0?(cost.variable/totalPR)*100:0}%`,background:"#16a34a",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:9,color:"#fff",fontWeight:600}}>{totalPR>0&&cost.variable/totalPR>.06?`$${cost.variable.toFixed(2)}`:""}</span></div>
+            {premPR>0&&<div style={{width:`${(premPR/totalPR)*100}%`,background:"#d97706",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:9,color:"#fff",fontWeight:600}}>{premPR/totalPR>.06?`$${premPR.toFixed(2)}`:""}</span></div>}
+            {vendPR>0&&<div style={{width:`${(vendPR/totalPR)*100}%`,background:"#b91c1c",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:9,color:"#fff",fontWeight:600}}>{vendPR/totalPR>.06?`$${vendPR.toFixed(2)}`:""}</span></div>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:12,fontSize:10,color:"#737373",marginTop:4}}>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#2563eb",borderRadius:2,marginRight:3}}/>Fixed</span>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#16a34a",borderRadius:2,marginRight:3}}/>Variable</span>
+          {premPR>0&&<span><span style={{display:"inline-block",width:10,height:10,background:"#d97706",borderRadius:2,marginRight:3}}/>FREP Premium</span>}
+          {vendPR>0&&<span><span style={{display:"inline-block",width:10,height:10,background:"#b91c1c",borderRadius:2,marginRight:3}}/>Vendor</span>}
+        </div>
+      </div>;
+    })() : (()=>{
+
+      return <div style={{marginTop:12}}>
+        <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>Blended Cost Per Return — Full Breakdown</h3>
+        <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+          <KPI label="Core COGS/Return" value={`$${corePR.toFixed(2)}`} sub="fixed + variable" color="#15803d"/>
+          <KPI label="All-In COGS/Return" value={`$${allInPR.toFixed(2)}`} sub="+ vendors" color="#b91c1c"/>
+          <KPI label={`Req'd @${pct(p.targetGM,0)} GM (core)`} value={`$${(corePR/(1-p.targetGM)).toFixed(2)}`}/>
+          <KPI label={`Req'd @${pct(p.targetGM,0)} GM (all-in)`} value={`$${(allInPR/(1-p.targetGM)).toFixed(2)}`}/>
+          <KPI label="FTEs" value={fixedD.ftesNeeded}/>
+          <KPI label="SHOP share" value={pct(fixedD.shopShare)}/>
+        </div>
+
+        <div style={{overflowX:"auto",marginBottom:20}}>
+        <table style={{borderCollapse:"collapse",width:"100%",maxWidth:750}}>
+          <thead><tr><HC v="Component" s={{textAlign:"left",minWidth:280}}/><HC v="Full Annual Cost"/><HC v={`SHOP Share (${pct(shopSh)})`}/><HC v="$/Return"/><HC v="% of All-In"/></tr></thead>
+          <tbody>
+            {(()=>{
+              // Helper for fixed rows: show full cost, then SHOP allocated, then per-return
+              const FR=({label,fullCost,indent,bold,bg,color,sep})=>{
+                const shopAlloc=fullCost*shopSh;
+                const perRet=trUsed>0?shopAlloc/trUsed:0;
+                return <tr style={{background:bg||"transparent",borderTop:sep?"2px solid #d4d4d4":"none"}}>
+                  <LC v={label} s={{fontWeight:bold?700:400,paddingLeft:indent?28:10,color:color||"inherit"}}/>
+                  <C v={fmt(fullCost)} s={{fontWeight:bold?700:400,color:color||"inherit"}}/>
+                  <C v={fmt(shopAlloc)} s={{fontWeight:bold?700:400,color:color||"#525252"}}/>
+                  <C v={`$${perRet.toFixed(2)}`} s={{fontWeight:bold?700:400,color:color||"inherit"}}/>
+                  <C v={allInPR>0?pct(perRet/allInPR):"—"} s={{color:"#737373"}}/>
+                </tr>;
+              };
+              return <>
+                <Sec>Fixed Costs — shared across {fmtN(fixedD.totalPlatformReturns)} platform returns (SHOP: {pct(shopSh)})</Sec>
+                <FR label={`Compliance team (${fixedD.ftesNeeded} FTEs: ${p.currentFTEs} existing + ${fixedD.additionalFTEs} new × $${fmtN(p.fteCost)}/yr)`} fullCost={fixedD.complianceCost} indent/>
+                <FR label="AWS infrastructure (fixed)" fullCost={fixedD.infraFixed} indent/>
+                <FR label="Symansis licenses" fullCost={fixedD.symansis} indent/>
+                <FR label="FREP risk reserve" fullCost={fixedD.frepReserve} indent/>
+                <FR label="TOTAL FIXED" fullCost={fixedD.totalFixed} bold bg="#fefce8"/>
+              </>;
+            })()}
+
+            <Sec>Variable Costs (per return — scales linearly)</Sec>
+            <WR label={`Platform compute × ${fmtN(trUsed)} returns`} total={trUsed*p.platformVar} perRet={p.platformVar} pctOf={allInPR>0?p.platformVar/allInPR:0} indent/>
+            <WR label={`CIP batch compute × ${fmtN(trUsed)} returns`} total={trUsed*p.cipVar} perRet={p.cipVar} pctOf={allInPR>0?p.cipVar/allInPR:0} indent/>
+            <WR label={`FREP premium ($${p.frepPremium} × FR/PL/ES/IT)`} total={totalFrepPrem} perRet={trUsed>0?totalFrepPrem/trUsed:0} pctOf={allInPR>0&&trUsed>0?(totalFrepPrem/trUsed)/allInPR:0} indent color="#b45309"/>
+            <WR label={`IOSS premium ($${p.iossPremium} × IOSS)`} total={totalIOSSPrem} perRet={trUsed>0?totalIOSSPrem/trUsed:0} pctOf={allInPR>0&&trUsed>0?(totalIOSSPrem/trUsed)/allInPR:0} indent color="#b45309"/>
+            {(()=>{
+              const varTotal=totalPlatCIP+totalFrepPrem+totalIOSSPrem;
+              const varPR=trUsed>0?varTotal/trUsed:0;
+              return <tr style={{background:"#fefce8"}}><LC v="TOTAL VARIABLE" s={{fontWeight:700}}/><C v={fmt(varTotal)} s={{fontWeight:700}}/><C v="—"/><C v={`$${varPR.toFixed(2)}`} s={{fontWeight:700}}/><C v={allInPR>0?pct(varPR/allInPR):"—"} s={{color:"#737373"}}/></tr>;
+            })()}
+
+            <tr><td colSpan={5} style={{height:4,borderBottom:"none"}}/></tr>
+            {(()=>{
+              const coreTotal=fixedD.shopFixedCost+totalPlatCIP+totalFrepPrem+totalIOSSPrem;
+              return <tr style={{background:"#f0fdf4"}}><LC v="═ CORE COGS (fixed + variable)" s={{fontWeight:700,color:"#15803d"}}/><C v={fmt(coreTotal)} s={{fontWeight:700,color:"#15803d"}}/><C v=""/><C v={`$${corePR.toFixed(2)}`} s={{fontWeight:700,color:"#15803d"}}/><C v={allInPR>0?pct(corePR/allInPR):"—"} s={{color:"#737373"}}/></tr>;
+            })()}
+            <tr><td colSpan={5} style={{height:4,borderBottom:"none"}}/></tr>
+
+            <Sec>Country Vendor Costs (only DE, NL, PL)</Sec>
+            <WR label={`DE Steuerberater (€${p.vendorDE}/ret × ${fmtN(deRet)} returns)`} total={vendorDEtotal} perRet={trUsed>0?vendorDEtotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorDEtotal/trUsed)/allInPR:0} indent color="#b91c1c"/>
+            <WR label={`NL FREP per-return (€${p.vendorNLPerReturn} × ${fmtN(nlRet)} returns)`} total={vendorNLprTotal} perRet={trUsed>0?vendorNLprTotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorNLprTotal/trUsed)/allInPR:0} indent color="#b91c1c"/>
+            <WR label={`NL FREP annual (€${p.vendorNLAnnual} × ${fmtN(nlMerch)} merchants)`} total={vendorNLannTotal} perRet={trUsed>0?vendorNLannTotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorNLannTotal/trUsed)/allInPR:0} indent color="#b91c1c"/>
+            <WR label={`NL registration (€${p.vendorNLReg} × ${fmtN(nlMerch)} ÷ ${p.contractTerm}yr)`} total={vendorNLregTotal} perRet={trUsed>0?vendorNLregTotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorNLregTotal/trUsed)/allInPR:0} indent color="#b91c1c"/>
+            <WR label={`PL translation ($${p.vendorPL} × ${fmtN(plRet)} returns)`} total={vendorPLtotal} perRet={trUsed>0?vendorPLtotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorPLtotal/trUsed)/allInPR:0} indent color="#b91c1c"/>
+            <WR label="TOTAL VENDOR" total={vendorAllTotal} perRet={trUsed>0?vendorAllTotal/trUsed:0} pctOf={allInPR>0&&trUsed>0?(vendorAllTotal/trUsed)/allInPR:0} bold bg="#fef2f2" color="#b91c1c"/>
+
+            <tr><td colSpan={5} style={{height:2,borderBottom:"none"}}/></tr>
+            <tr style={{background:"#eff6ff",borderTop:"2px solid #d4d4d4"}}><LC v="═ ALL-IN COGS PER RETURN" s={{fontWeight:700}}/><C v={fmt(totalAllIn)} s={{fontWeight:700}}/><C v=""/><C v={`$${allInPR.toFixed(2)}`} s={{fontWeight:700,fontSize:14}}/><C v="100%" s={{fontWeight:700}}/></tr>
+          </tbody>
+        </table>
+        </div>
+
+        {/* Stacked bar */}
+        <h4 style={{fontSize:13,fontWeight:600,marginBottom:6}}>Cost Composition ($/return)</h4>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <div style={{flex:1,height:36,display:"flex",borderRadius:4,overflow:"hidden",maxWidth:600}}>
+            <div style={{width:`${allInPR>0?(fixedD.fixedPerReturn/allInPR)*100:0}%`,background:"#2563eb",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:10,color:"#fff",fontWeight:600}}>${fixedD.fixedPerReturn.toFixed(2)}</span></div>
+            <div style={{width:`${allInPR>0?((corePR-fixedD.fixedPerReturn)/allInPR)*100:0}%`,background:"#16a34a",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:10,color:"#fff",fontWeight:600}}>${(corePR-fixedD.fixedPerReturn).toFixed(2)}</span></div>
+            {vendorAllTotal>0&&<div style={{width:`${((allInPR-corePR)/allInPR)*100}%`,background:"#b91c1c",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:10,color:"#fff",fontWeight:600}}>${(allInPR-corePR).toFixed(2)}</span></div>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:12,fontSize:10,color:"#737373",marginBottom:16}}>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#2563eb",borderRadius:2,marginRight:3}}/>Fixed ({pct(allInPR>0?fixedD.fixedPerReturn/allInPR:0)})</span>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#16a34a",borderRadius:2,marginRight:3}}/>Variable ({pct(allInPR>0?(corePR-fixedD.fixedPerReturn)/allInPR:0)})</span>
+          {vendorAllTotal>0&&<span><span style={{display:"inline-block",width:10,height:10,background:"#b91c1c",borderRadius:2,marginRight:3}}/>Vendor ({pct(allInPR>0?(allInPR-corePR)/allInPR:0)})</span>}
+        </div>
+
+        {/* Country detail table */}
+        <h4 style={{fontSize:13,fontWeight:600,marginBottom:6}}>Per-Country Detail</h4>
+        <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%"}}>
+          <thead><tr><HC v="Country" s={{textAlign:"left"}}/><HC v="Ret Share"/><HC v="Fixed"/><HC v="Variable"/><HC v="Vendor"/><HC v="Total"/><HC v="Weighted"/></tr></thead>
+          <tbody>
+            {COUNTRIES.map(c=>{const d=cogsData.details[c];return <tr key={c} style={{background:d.vendor>10?"rgba(185,28,28,.04)":"transparent"}}>
+              <LC v={CLABELS[c]} s={{fontWeight:(c==="DE"||c==="NL")?700:400}}/>
+              <C v={pct(d.weight)}/><C v={`$${d.fixed.toFixed(2)}`}/><C v={`$${d.variable.toFixed(2)}`}/>
+              <C v={d.vendor>0?`$${d.vendor.toFixed(2)}`:"—"} s={{color:d.vendor>0?"#b91c1c":"#d4d4d4"}}/>
+              <C v={`$${d.total.toFixed(2)}`} s={{fontWeight:700,color:d.vendor>10?"#b91c1c":"inherit"}}/>
+              <C v={`$${d.weighted.toFixed(3)}`}/>
+            </tr>;})}
+            <tr style={{background:"#eff6ff"}}><LC v="Blended" s={{fontWeight:700}}/><C v="100%"/><C v=""/><C v=""/><C v=""/><C v=""/><C v={`$${cogsData.blended.toFixed(2)}`} s={{fontWeight:700,color:"#1e40af"}}/></tr>
+          </tbody>
+        </table>
+        </div>
+
+        {/* Bar chart */}
+        <h4 style={{fontSize:12,fontWeight:600,marginTop:14,marginBottom:4}}>Weighted Cost Contribution by Country</h4>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+          {[...COUNTRIES].sort((a,b)=>cogsData.details[b].weighted-cogsData.details[a].weighted).map(c=>{
+            const d=cogsData.details[c];const mx=Math.max(...COUNTRIES.map(x=>cogsData.details[x].weighted));
+            return <div key={c} style={{display:"flex",alignItems:"center",gap:6}}>
+              <div style={{width:30,fontSize:10,textAlign:"right"}}>{c}</div>
+              <div style={{flex:1,height:18,background:"#f5f5f5",borderRadius:3,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${mx>0?(d.weighted/mx)*100:0}%`,background:d.vendor>10?"#b91c1c":d.vendor>0?"#d97706":"#2563eb",borderRadius:3}}/>
+              </div>
+              <div style={{width:60,fontSize:10}}>${d.weighted.toFixed(3)}</div>
+            </div>;
+          })}
+        </div>
+        <div style={{display:"flex",gap:12,fontSize:10,color:"#737373",marginTop:4}}>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#2563eb",borderRadius:2,marginRight:3}}/>Standard</span>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#d97706",borderRadius:2,marginRight:3}}/>Minor vendor (PL)</span>
+          <span><span style={{display:"inline-block",width:10,height:10,background:"#b91c1c",borderRadius:2,marginRight:3}}/>High vendor (DE/NL)</span>
+        </div>
+      </div>;
+    })()}
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 5: COUNTRY P&L
+// ═══════════════════════════════════════════════════════════
+function CountryPnL({p}) {
+  const [selC,setSelC]=useState("UK");
+  const [selSc,setSelSc]=useState("base");
+  const sc=SCENARIOS[selSc];
+  const otherSum=COUNTRIES.filter(x=>x!=="UK").reduce((s,x)=>s+(p.mix[x]||0),0);
+  const liveMix={...p.mix,UK:Math.max(0,100-otherSum)};
+
+  const data=YEARS.map((_,yi)=>{
+    const halfYear=yi===0?0.5:1;
+    const adopt=sc.adoptionByYear[yi];
+    const tam=p.totalMerchants*p.pctInternational;
+    const active=Math.round(tam*adopt);
+    const cMerch=Math.round(active*(liveMix[selC]||0)/100);
+    const cRet=Math.round(cMerch*(p.filingFreq[selC]||4)*halfYear);
+    let totalRet=0;
+    COUNTRIES.forEach(c=>totalRet+=Math.round(Math.round(active*(liveMix[c]||0)/100)*(p.filingFreq[c]||4)*halfYear));
+    const cost=calcCountryCost(selC,totalRet,p,yi);
+    const isComplex=p.complexCountries[selC];
+    const price=(isComplex?p.complexPrice:p.standardPrice)*(1-sc.discountPct);
+    const filingRev=cRet*price;
+    const isFREP=p.frepType[selC]!=="none"&&p.frepType[selC]!=="steuerberater";
+    const frepRev=isFREP?cMerch*p.frepFee*halfYear:0;
+    const prevAdopt=yi===0?0:sc.adoptionByYear[yi-1];
+    const prevMerch=Math.round(tam*prevAdopt*(liveMix[selC]||0)/100);
+    const newMerch=Math.max(0,cMerch-prevMerch);
+    const regRev=newMerch*p.regFee;
+    const suppRev=cRet*p.offProductRate*p.correctiveFee;
+    const totalRev=filingRev+frepRev+regRev+suppRev;
+    const filingCOGS=cRet*cost.total;
+    const regCost=newMerch*p.regProcessingCost;
+    const frepAdm=isFREP?cMerch*p.frepAdminCost*halfYear:0;
+    const suppCost=cRet*p.offProductRate*p.supportInternalCost;
+    const totalExp=filingCOGS+regCost+frepAdm+suppCost;
+    const gp=totalRev-totalExp;
+    const gm=totalRev>0?gp/totalRev:0;
+    return {cMerch,cRet,price,totalRet,cost,filingRev,frepRev,regRev,suppRev,totalRev,filingCOGS,regCost,frepAdm,suppCost,totalExp,gp,gm,newMerch};
+  });
+  const totK=k=>data.reduce((s,r)=>s+r[k],0);
+
+  return <div>
+    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+      <span style={{fontSize:12,fontWeight:600}}>Country:</span>
+      {COUNTRIES.map(c=><button key={c} onClick={()=>setSelC(c)} style={{padding:"4px 10px",fontSize:11,fontWeight:selC===c?700:400,background:selC===c?"#1e40af":"#f5f5f5",color:selC===c?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{c}</button>)}
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+      <span style={{fontSize:12,fontWeight:600}}>Scenario:</span>
+      {Object.entries(SCENARIOS).map(([k,v])=><button key={k} onClick={()=>setSelSc(k)} style={{padding:"4px 10px",fontSize:11,fontWeight:selSc===k?700:400,background:selSc===k?"#7c3aed":"#f5f5f5",color:selSc===k?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{v.label}</button>)}
+    </div>
+
+    <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+      <KPI label="Country" value={CLABELS[selC]}/>
+      <KPI label="Mix" value={`${liveMix[selC]}%`}/>
+      <KPI label="Freq" value={`${p.filingFreq[selC]||4}/yr`}/>
+      <KPI label="Complex?" value={p.complexCountries[selC]?"Yes":"No"}/>
+      <KPI label="Y2 COGS/Ret" value={`$${data[1]?.cost?.total?.toFixed(2)||"—"}`} color={(selC==="DE"||selC==="NL")?"#b91c1c":"#15803d"}/>
+      <KPI label="Y2 GM%" value={pct(data[1]?.gm)} color={gmC(data[1]?.gm||0)}/>
+    </div>
+
+    {/* Cost per return box */}
+    <div style={{background:"#fafafa",borderRadius:8,padding:12,marginBottom:16,border:"1px solid #e5e5e5",maxWidth:400}}>
+      <h4 style={{fontSize:12,fontWeight:700,marginBottom:6}}>Cost Per Return — {CLABELS[selC]} (Y2)</h4>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 80px",gap:"2px 16px",fontSize:12}}>
+        <span>Fixed (allocated)</span><span style={{fontWeight:600,textAlign:"right"}}>${data[1]?.cost?.fixed?.toFixed(2)}</span>
+        <span>Variable</span><span style={{fontWeight:600,textAlign:"right"}}>${data[1]?.cost?.variable?.toFixed(2)}</span>
+        <span>Vendor</span><span style={{fontWeight:600,textAlign:"right",color:data[1]?.cost?.vendor>0?"#b91c1c":"inherit"}}>${data[1]?.cost?.vendor?.toFixed(2)}</span>
+        <span style={{fontWeight:700,borderTop:"2px solid #d4d4d4",paddingTop:4}}>Total</span><span style={{fontWeight:700,borderTop:"2px solid #d4d4d4",paddingTop:4,textAlign:"right"}}>${data[1]?.cost?.total?.toFixed(2)}</span>
+      </div>
+    </div>
+
+    <div style={{overflowX:"auto"}}>
+    <table style={{borderCollapse:"collapse",width:"100%"}}>
+      <thead><tr><HC v="" s={{textAlign:"left"}}/>{YEARS.map(y=><HC key={y} v={y+(y===2026?" (½yr)":"")}/>)}<HC v="Total"/></tr></thead>
+      <tbody>
+        <tr><LC v="Merchants"/>{data.map((r,i)=><C key={i} v={fmtN(r.cMerch)}/>)}<C v=""/></tr>
+        <tr><LC v="Returns" s={{fontWeight:600}}/>{data.map((r,i)=><C key={i} v={fmtN(r.cRet)} s={{fontWeight:600}}/>)}<C v={fmtN(totK("cRet"))} s={{fontWeight:600}}/></tr>
+        <Sec>Revenue</Sec>
+        <tr><LC v="Filing"/>{data.map((r,i)=><C key={i} v={fmt(r.filingRev/1000)}/>)}<C v={fmt(totK("filingRev")/1000)}/></tr>
+        <tr><LC v="FREP+Reg+Support"/>{data.map((r,i)=><C key={i} v={fmt((r.frepRev+r.regRev+r.suppRev)/1000)}/>)}<C v={fmt((totK("frepRev")+totK("regRev")+totK("suppRev"))/1000)}/></tr>
+        <tr style={{background:"#eff6ff"}}><LC v="Total Revenue" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.totalRev/1000)} s={{fontWeight:700}}/>)}<C v={fmt(totK("totalRev")/1000)} s={{fontWeight:700}}/></tr>
+        <Sec>Expenses</Sec>
+        <tr><LC v="Filing COGS"/>{data.map((r,i)=><C key={i} v={fmt(r.filingCOGS/1000)}/>)}<C v={fmt(totK("filingCOGS")/1000)}/></tr>
+        <tr><LC v="Ancillary"/>{data.map((r,i)=><C key={i} v={fmt((r.regCost+r.frepAdm+r.suppCost)/1000)}/>)}<C v={fmt((totK("regCost")+totK("frepAdm")+totK("suppCost"))/1000)}/></tr>
+        <tr style={{background:"#fef2f2"}}><LC v="Total Expenses" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.totalExp/1000)} s={{fontWeight:700}}/>)}<C v={fmt(totK("totalExp")/1000)} s={{fontWeight:700}}/></tr>
+        <Sec>Profitability</Sec>
+        <tr style={{background:"#f0fdf4"}}><LC v="Gross Profit" s={{fontWeight:700}}/>{data.map((r,i)=><C key={i} v={fmt(r.gp/1000)} s={{fontWeight:700}}/>)}<C v={fmt(totK("gp")/1000)} s={{fontWeight:700}}/></tr>
+        <tr><LC v="GM%" s={{fontWeight:600}}/>{data.map((r,i)=><C key={i} v={pct(r.gm)} s={{color:gmC(r.gm),fontWeight:700}}/>)}<C v={pct(totK("totalRev")>0?totK("gp")/totK("totalRev"):0)} s={{fontWeight:700}}/></tr>
+      </tbody>
+    </table>
+    </div>
+
+    {/* All countries Y2 snapshot */}
+    <h4 style={{fontSize:13,fontWeight:600,marginTop:16,marginBottom:6}}>All Countries — {YEARS[1]} ({SCENARIOS[selSc].label})</h4>
+    <div style={{overflowX:"auto"}}>
+    <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+      <thead><tr><HC v="Country" s={{textAlign:"left"}}/><HC v="Returns"/><HC v="COGS/Ret"/><HC v="Price"/><HC v="Revenue"/><HC v="COGS"/><HC v="GM%"/></tr></thead>
+      <tbody>{COUNTRIES.map(c=>{
+        const adopt=sc.adoptionByYear[1];const tam=p.totalMerchants*p.pctInternational;
+        const active=Math.round(tam*adopt);const cm=Math.round(active*(liveMix[c]||0)/100);
+        const cr=Math.round(cm*(p.filingFreq[c]||4));
+        let totalRet=0;COUNTRIES.forEach(x=>totalRet+=Math.round(Math.round(active*(liveMix[x]||0)/100)*(p.filingFreq[x]||4)));
+        const cost=calcCountryCost(c,totalRet,p,1);
+        const isComplex=p.complexCountries[c];
+        const price=(isComplex?p.complexPrice:p.standardPrice)*(1-sc.discountPct);
+        const rev=cr*price;const exp=cr*cost.total;const gm=rev>0?(rev-exp)/rev:0;
+        return <tr key={c} style={{background:c===selC?"#eff6ff":"transparent",cursor:"pointer"}} onClick={()=>setSelC(c)}>
+          <LC v={CLABELS[c]} s={{fontWeight:c===selC?700:400}}/>
+          <C v={fmtN(cr)}/><C v={`$${cost.total.toFixed(2)}`} s={{color:cost.vendor>10?"#b91c1c":"inherit"}}/>
+          <C v={`$${price.toFixed(0)}`}/><C v={fmt(rev/1000)}/><C v={fmt(exp/1000)}/>
+          <C v={pct(gm)} s={{color:gmC(gm),fontWeight:700}}/>
+        </tr>;})}</tbody>
+    </table>
+    </div>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 6: PRICING ENGINE
+// ═══════════════════════════════════════════════════════════
+function PricingEngine({p}) {
+  const vols=[50000,100000,250000,500000,1000000,2000000];
+  const prices=[15,20,25,30,35,40,50,60];
+  const volData=vols.map(v=>{
+    const tam=p.totalMerchants*p.pctInternational;
+    const ia=v/(tam*calcWeightedFreq(p));
+    const vol=calcVolume({...p,scenarioAdoption:SCENARIOS.base.adoptionByYear},Math.min(ia,0.5),1);
+    const tr=vol.totalReturns>0?vol.totalReturns:v;
+    const cd=calcBlendedCOGS(tr,vol.countries,p,1);
+    const fd=calcFixedCosts(tr,p,1);
+    return {v:tr,...cd,fixedPR:fd.fixedPerReturn,ftes:fd.ftesNeeded};
+  });
+
+  return <div>
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>Cost Structure by Volume</h3>
+    <div style={{overflowX:"auto",marginBottom:20}}>
+    <table style={{borderCollapse:"collapse"}}>
+      <thead><tr><HC v="Volume"/><HC v="Fixed/Ret"/><HC v="Var/Ret"/><HC v="Vendor/Ret"/><HC v="Core COGS"/><HC v="All-In"/><HC v="FTEs"/><HC v={`@${pct(p.targetGM,0)} GM (core)`}/><HC v={`@${pct(p.targetGM,0)} GM (all-in)`}/></tr></thead>
+      <tbody>{volData.map(r=>{
+        const varPR=r.core-r.fixedPR;const vendPR=r.blended-r.core;
+        return <tr key={r.v}><LC v={fmtN(r.v)}/><C v={`$${r.fixedPR.toFixed(2)}`}/><C v={`$${varPR.toFixed(2)}`}/><C v={`$${vendPR.toFixed(2)}`} s={{color:"#b91c1c"}}/>
+          <C v={`$${r.core.toFixed(2)}`} s={{fontWeight:600}}/><C v={`$${r.blended.toFixed(2)}`} s={{fontWeight:700}}/>
+          <C v={r.ftes}/><C v={`$${(r.core/(1-p.targetGM)).toFixed(2)}`}/><C v={`$${(r.blended/(1-p.targetGM)).toFixed(2)}`}/>
+        </tr>;})}</tbody>
+    </table>
+    </div>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>GM Sensitivity: Price × Volume (All-In)</h3>
+    <div style={{overflowX:"auto",marginBottom:16}}>
+    <table style={{borderCollapse:"collapse",fontSize:11}}>
+      <thead><tr><HC v="Vol \ Price" s={{textAlign:"left"}}/>{prices.map(pr=><HC key={pr} v={`$${pr}`}/>)}</tr></thead>
+      <tbody>{volData.map(row=><tr key={row.v}><LC v={fmtN(row.v)}/>{prices.map(pr=>{const gm=(pr-row.blended)/pr;return <td key={pr} style={{padding:"4px 6px",textAlign:"center",fontSize:11,fontWeight:600,color:gmC(gm),background:gmBg(gm),borderBottom:"1px solid #e5e5e5"}}>{pct(gm)}</td>;})}</tr>)}</tbody>
+    </table>
+    </div>
+
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>GM Sensitivity: Core Only (Vendor Billed Separately)*</h3>
+    <div style={{overflowX:"auto"}}>
+    <table style={{borderCollapse:"collapse",fontSize:11}}>
+      <thead><tr><HC v="Vol \ Price" s={{textAlign:"left"}}/>{prices.map(pr=><HC key={pr} v={`$${pr}`}/>)}</tr></thead>
+      <tbody>{volData.map(row=><tr key={row.v}><LC v={fmtN(row.v)}/>{prices.map(pr=>{const gm=(pr-row.core)/pr;return <td key={pr} style={{padding:"4px 6px",textAlign:"center",fontSize:11,fontWeight:600,color:gmC(gm),background:gmBg(gm),borderBottom:"1px solid #e5e5e5"}}>{pct(gm)}</td>;})}</tr>)}</tbody>
+    </table>
+    </div>
+    <p style={{fontSize:11,color:"#666",marginTop:6,fontStyle:"italic",borderTop:"1px solid #e5e7eb",paddingTop:6}}>*Fixed and Variable Costs Avalara Only — this passes additional country-specific costs on</p>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB: COMPETITORS
+// ═══════════════════════════════════════════════════════════
+function Competitors({p}) {
+  // Calc Avalara blended price from model
+  const tam=p.totalMerchants*p.pctInternational;
+  const vol=calcVolume({...p,scenarioAdoption:SCENARIOS.base.adoptionByYear},SCENARIOS.base.adoptionByYear[1],1);
+  const tr=vol.totalReturns;
+  let filingRev=0;
+  COUNTRIES.forEach(c=>{const cr=vol.countries[c]?.returns||0;const isC=p.complexCountries[c];filingRev+=cr*(isC?p.complexPrice:p.standardPrice)*(1-SCENARIOS.base.discountPct);});
+  const blendedPrice=tr>0?filingRev/tr:p.standardPrice;
+
+  const competitors=[
+    {name:"Avalara (Us)",hq:"Seattle, US",rate:blendedPrice,reg:`$${p.regFee}/country`,frep:`$${p.frepFee}/country/yr`,corr:"Yes (standard)",shopify:"Yes — native API",src:"Model assumptions",highlight:true},
+    {name:"amavat",hq:"Wrocław, PL",rateEUR:33.25,reg:"~€350/country",frep:"€600–€1,200/yr",corr:"Not stated",shopify:"Yes",src:"amavat.eu/pricing"},
+    {name:"hellotax",hq:"Berlin, DE",rateEUR:34.99,reg:"€250–€590/country",frep:"Included",corr:"Yes",shopify:"Yes",src:"hellotax.com/pricing"},
+    {name:"Marosa",hq:"Barcelona, ES",rateEUR:52.50,reg:"€300–€600 est.",frep:"Included",corr:"Yes",shopify:"No",src:"marosavat.com",est:true},
+    {name:"Taxually",hq:"Budapest, HU",rateEUR:60,reg:"€500–€1,000 est.",frep:"€1,200–€3,000/yr est.",corr:"Varies",shopify:"Yes",src:"taxually.com",est:true},
+    {name:"Meridian",hq:"Dublin, IE",rateEUR:60,reg:"€400–€800 est.",frep:"€1,000–€2,500/yr est.",corr:"Yes",shopify:"No",src:"meridianglobalservices.com",est:true},
+    {name:"Numeral",hq:"San Francisco, US",rateUSD:75,reg:"$150/country",frep:"Not confirmed",corr:"Yes",shopify:"Yes",src:"numeral.io/pricing"},
+    {name:"Kintsugi",hq:"San Francisco, US",rateUSD:75,reg:"$75/country",frep:"Not confirmed",corr:"Yes",shopify:"Yes",src:"trykintsugi.com/pricing"},
+    {name:"SimplyVAT",hq:"Belfast, UK",rateGBP:75,reg:"£250–£500 est.",frep:"£500–£1,500/yr est.",corr:"Not stated",shopify:"No",src:"simplyvat.com",est:true},
+    {name:"KPMG / Big 4",hq:"Global",rateEUR:275,reg:"€1,000–€3,000",frep:"€2,000–€5,000/yr",corr:"Yes",shopify:"No",src:"kpmg.com",est:true},
+  ];
+
+  const withUSD=competitors.map(c=>{
+    let usd;
+    if(c.highlight) usd=c.rate;
+    else if(c.rateUSD) usd=c.rateUSD;
+    else if(c.rateEUR) usd=c.rateEUR*p.EURUSD;
+    else if(c.rateGBP) usd=c.rateGBP*p.GBPUSD;
+    else usd=0;
+    const annual=100000*usd;
+    const vs=blendedPrice>0?((usd-blendedPrice)/blendedPrice*100):0;
+    return {...c,usd,annual,vs};
+  });
+
+  const sorted=[...withUSD].sort((a,b)=>a.usd-b.usd);
+  const maxAnnual=Math.max(...sorted.map(s=>s.annual));
+  const maxRate=Math.max(...sorted.map(s=>s.usd));
+
+  // Table cell helper with left-align and decent padding
+  const TC=({v,s={}})=><td style={{padding:"7px 12px",fontSize:12,textAlign:"left",borderBottom:"1px solid #e5e5e5",verticalAlign:"top",...s}}>{v}</td>;
+
+  return <div>
+    <h3 style={{fontSize:15,fontWeight:700,marginBottom:14}}>Competitive Pricing Comparison — EU/International VAT Filing</h3>
+
+    <div style={{overflowX:"auto",marginBottom:24}}>
+    <table style={{borderCollapse:"collapse",width:"100%"}}>
+      <thead><tr style={{background:"#fafafa",borderBottom:"2px solid #d4d4d4"}}>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:110}}>Provider</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:90}}>HQ</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:130}}>Per-Return (USD)</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:110}}>VAT Registration</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:120}}>Fiscal Rep</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:90}}>Correctives?</th>
+        <th style={{padding:"7px 12px",fontSize:11,fontWeight:600,textAlign:"left",minWidth:90}}>Shopify App?</th>
+      </tr></thead>
+      <tbody>{withUSD.map((c,i)=>(
+        <tr key={i} style={{background:c.highlight?"#f0fdf4":"transparent"}}>
+          <TC v={c.name} s={{fontWeight:c.highlight?700:500,color:c.highlight?"#15803d":"#171717"}}/>
+          <TC v={c.hq} s={{color:"#737373"}}/>
+          <TC v={c.highlight
+            ?<span><strong>${p.standardPrice}</strong> std / <strong>${p.complexPrice}</strong> complex</span>
+            :<span style={{fontStyle:c.est?"italic":"normal"}}>${c.usd.toFixed(2)}{c.est?" (est.)":""}</span>
+          } s={{fontWeight:c.highlight?700:400,color:c.highlight?"#15803d":"#171717"}}/>
+          <TC v={c.reg}/>
+          <TC v={c.frep}/>
+          <TC v={c.corr}/>
+          <TC v={c.shopify} s={{color:c.shopify.startsWith("Yes")?"#15803d":"#a3a3a3"}}/>
+        </tr>
+      ))}</tbody>
+    </table>
+    </div>
+
+    {/* Per-return price positioning */}
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:10}}>Per-Return Price Comparison</h3>
+    <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:20}}>
+      {sorted.map((c,i)=>{
+        const barW=maxRate>0?(c.usd/maxRate)*100:0;
+        const isUs=c.highlight;
+        return <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:110,fontSize:11,textAlign:"right",fontWeight:isUs?700:400,color:isUs?"#1e40af":"#525252",flexShrink:0}}>{c.name}</div>
+          <div style={{flex:1,height:24,background:"#f5f5f5",borderRadius:4,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${barW}%`,background:isUs?"#2563eb":"#94a3b8",borderRadius:4,transition:"width .3s"}}/>
+          </div>
+          <div style={{width:65,fontSize:11,fontWeight:isUs?700:400,flexShrink:0}}>${c.usd.toFixed(2)}</div>
+          <div style={{width:55,fontSize:10,flexShrink:0,textAlign:"right",fontWeight:600,color:c.vs>0?"#15803d":c.vs<0?"#b91c1c":"#525252"}}>
+            {isUs?"—":`${c.vs>0?"+":""}${c.vs.toFixed(0)}%`}
+          </div>
+        </div>;
+      })}
+    </div>
+
+    {/* What SHOP would pay annually */}
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>SHOP-Avalara Returns Revenue — 100K Returns</h3>
+    <p style={{fontSize:11,color:"#737373",marginBottom:10}}>Annual filing revenue at 100,000 returns per provider at their per-return rate.</p>
+    <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:8}}>
+      {sorted.map((c,i)=>{
+        const barW=maxAnnual>0?(c.annual/maxAnnual)*100:0;
+        const isUs=c.highlight;
+        return <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:110,fontSize:11,textAlign:"right",fontWeight:isUs?700:400,color:isUs?"#1e40af":"#525252",flexShrink:0}}>{c.name}</div>
+          <div style={{flex:1,height:24,background:"#f5f5f5",borderRadius:4,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${barW}%`,background:isUs?"#2563eb":"#94a3b8",borderRadius:4,transition:"width .3s"}}/>
+          </div>
+          <div style={{width:75,fontSize:11,fontWeight:isUs?700:400,flexShrink:0}}>{fmt(c.annual)}</div>
+          <div style={{width:55,fontSize:10,flexShrink:0,textAlign:"right",fontWeight:600,color:c.vs>0?"#15803d":c.vs<0?"#b91c1c":"#525252"}}>
+            {isUs?"—":`${c.vs>0?"+":""}${c.vs.toFixed(0)}%`}
+          </div>
+        </div>;
+      })}
+    </div>
+    <p style={{fontSize:10,color:"#a3a3a3",marginBottom:20}}>Based on 100,000 returns. Avalara blended rate: ${blendedPrice.toFixed(2)}/return (after {pct(SCENARIOS.base.discountPct,0)} discount). Does not include registration, FREP, or corrective fees.</p>
+
+    {/* Sources */}
+    <div style={{fontSize:10,color:"#a3a3a3",marginBottom:6}}>
+      <strong>Sources:</strong>{" "}
+      {withUSD.filter(c=>!c.highlight).map((c,i)=><span key={i}>{i>0?" · ":""}{c.src}</span>)}
+    </div>
+
+    <p style={{fontSize:10,color:"#999",marginTop:12,borderTop:"1px solid #e5e7eb",paddingTop:10}}>
+      Competitor pricing based on published rates and market estimates as of Q1 2026.
+      Prices marked "(est.)" are directional estimates — not confirmed quotes.
+      Custom/volume pricing is not reflected. Verify independently before using in negotiations.
+    </p>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 7: VOLUME MATRIX
+// ═══════════════════════════════════════════════════════════
+function VolumeMatrix({p}) {
+  const [sel,setSel]=useState("base");const sc=SCENARIOS[sel];
+  const otherSum=COUNTRIES.filter(x=>x!=="UK").reduce((s,x)=>s+(p.mix[x]||0),0);
+  const liveMix={...p.mix,UK:Math.max(0,100-otherSum)};
+  return <div>
+    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+      {Object.entries(SCENARIOS).map(([k,v])=><button key={k} onClick={()=>setSel(k)} style={{padding:"5px 12px",fontSize:11,fontWeight:sel===k?700:400,background:sel===k?"#1e40af":"#f5f5f5",color:sel===k?"#fff":"#525252",border:"none",borderRadius:4,cursor:"pointer"}}>{v.label}</button>)}
+    </div>
+    <div style={{overflowX:"auto"}}>
+    <table style={{borderCollapse:"collapse",width:"100%"}}>
+      <thead><tr><HC v="Country" s={{textAlign:"left"}}/><HC v="Freq"/>{YEARS.map(y=><HC key={y} v={y}/>)}<HC v="Mix"/></tr></thead>
+      <tbody>{COUNTRIES.map(c=><tr key={c}><LC v={CLABELS[c]}/><C v={`${p.filingFreq[c]||4}/yr`} s={{color:"#737373"}}/>
+        {YEARS.map((y,i)=>{const adopt=sc.adoptionByYear[i];const tam=p.totalMerchants*p.pctInternational;const active=Math.round(tam*adopt);const cm=Math.round(active*(liveMix[c]||0)/100);const cr=Math.round(cm*(p.filingFreq[c]||4)*(i===0?0.5:1));return <C key={y} v={fmtN(cr)}/>;})}
+        <C v={`${liveMix[c]}%`}/></tr>)}
+      <tr style={{fontWeight:700,background:"#fafafa"}}><LC v="Total" s={{fontWeight:700}}/><C v=""/>
+        {YEARS.map((y,i)=>{const adopt=sc.adoptionByYear[i];const tam=p.totalMerchants*p.pctInternational;const active=Math.round(tam*adopt);let t=0;COUNTRIES.forEach(c=>t+=Math.round(Math.round(active*(liveMix[c]||0)/100)*(p.filingFreq[c]||4)*(i===0?0.5:1)));return <C key={y} v={fmtN(t)} s={{fontWeight:700}}/>;})}
+        <C v="100%"/></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// TAB 8: GLOSSARY
+// ═══════════════════════════════════════════════════════════
+function Glossary(){
+  const terms=[
+    ["VAT Return","Periodic tax filing submitted to a country's tax authority."],
+    ["Fixed Costs","Costs that don't change with volume — compliance team, AWS, licenses, FREP reserve. More returns = lower cost per return."],
+    ["Variable Costs","Costs that scale per return — platform compute ($2.75) + CIP ($0.35) + FREP/IOSS premiums."],
+    ["Vendor Costs","Third-party fees in specific countries — DE Steuerberater (€50/ret), NL FREP (€50/ret + annual + reg), PL translation ($1)."],
+    ["Core COGS","Fixed + Variable costs only. What Avalara controls. Excludes vendor costs."],
+    ["All-In COGS","Core + Vendor costs. The true economic cost per return."],
+    ["FREP","Fiscal Representative — Avalara is jointly liable for the merchant's VAT in FR, PL, ES, IT."],
+    ["IOSS","Import One-Stop Shop — EU scheme for imports ≤€150. Higher risk because liability covers all 27 EU states."],
+    ["Steuerberater","German licensed tax advisor required by law to sign off on VAT returns."],
+    ["Two-Tier Pricing","Standard ($25) for UK/BE/CZ/CA. Complex ($35) for DE/FR/NL/PL/ES/IT/IOSS."],
+    ["Adoption Rate","% of 600K international merchants who subscribe to filing. Main volume driver."],
+    ["Operating Leverage","Fixed costs spread over more returns = lower cost per return = higher margins at volume."],
+  ];
+  return <div>
+    <h3 style={{fontSize:14,fontWeight:700,marginBottom:8}}>Glossary</h3>
+    {terms.map(([t,d])=><div key={t} style={{marginBottom:8}}><span style={{fontWeight:600,fontSize:12}}>{t}:</span> <span style={{fontSize:12,color:"#525252"}}>{d}</span></div>)}
+  </div>;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════
+const TABS=["Scenario Compare","Assumptions","Cost Breakdown","Country P&L","Pricing Engine","Competitors","Volume Matrix","Glossary"];
+
+const AppComponent = function App(){
+  const [tab,setTab]=useState(0);
+  const [mix,setMix]=useState({...DEFAULT_MIX});
+  const [vendorPct,setVendorPct]=useState({...DEFAULT_VENDOR_PCT});
+  const [params,setP]=useState({
+    totalMerchants:1500000, pctInternational:0.40, contractTerm:1,
+    avgCountriesPerMerchant:3,
+    // Fixed costs
+    currentFTEs:12, fteCost:50000, returnsPerFTE:10000,
+    existingVolume:48000, infraFixed:168000, symansisDE:5200, symansisSVR:5100,
+    frepReserve:250000, costInflation:0.03,
+    // Variable costs
+    platformVar:2.75, cipVar:0.35, frepPremium:0.50, iossPremium:1.00,
+    // Vendor costs
+    vendorDE:50, vendorNLPerReturn:50, vendorNLAnnual:450, vendorNLReg:500, vendorPL:1.00,
+    // Pricing
+    standardPrice:25, complexPrice:35, targetGM:0.65, maxDiscount:0.15,
+    // Ancillary
+    frepFee:650, regFee:175, regProcessingCost:100, frepAdminCost:200,
+    offProductRate:0.01, correctiveFee:175, supportInternalCost:50,
+    // FX
+    EURUSD:1.08, GBPUSD:1.26,
+    // Per-country settings
+    filingFreq:{...DEFAULT_FILING_FREQ},
+    frepType:{...DEFAULT_FREP_TYPE},
+    complexCountries:{...DEFAULT_COMPLEX},
+  });
+
+  const fullP=useMemo(()=>({...params,mix,vendorPct}),[params,mix,vendorPct]);
+
+  return <div style={{fontFamily:"'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif",maxWidth:1200,margin:"0 auto",padding:"12px 8px"}}>
+    <div style={{marginBottom:10}}>
+      <h1 style={{fontSize:18,fontWeight:800,margin:0,color:"#171717"}}>SHOP International Returns — Pricing & Cost Model</h1>
+      <p style={{fontSize:11,color:"#737373",margin:"3px 0 0"}}>Avalara × SHOP | 2026–2030 | Fixed + Variable + Vendor = Cost Per Return</p>
+    </div>
+    <div style={{display:"flex",gap:0,borderBottom:"1px solid #d4d4d4",overflowX:"auto",marginBottom:14}}>
+      {TABS.map((t,i)=><TabBtn key={t} label={t} active={tab===i} onClick={()=>setTab(i)}/>)}
+    </div>
+    <div style={{minHeight:450}}>
+      {tab===0&&<ScenarioCompare p={fullP}/>}
+      {tab===1&&<AssumptionsTab p={params} setP={setP} mix={mix} setMix={setMix} vendorPct={vendorPct} setVendorPct={setVendorPct}/>}
+      {tab===2&&<CostBreakdown p={fullP}/>}
+      {tab===3&&<CountryPnL p={fullP}/>}
+      {tab===4&&<PricingEngine p={fullP}/>}
+      {tab===5&&<Competitors p={fullP}/>}
+      {tab===6&&<VolumeMatrix p={fullP}/>}
+      {tab===7&&<Glossary/>}
+    </div>
+  </div>;
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(AppComponent));
+</script>
+</body>
+</html>
